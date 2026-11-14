@@ -1,21 +1,22 @@
 // Programmatic generators for tiny but valid book files used by tests.
 import { strToU8, zipSync, type Zippable } from "fflate";
-import sharp from "sharp";
+import { rgbToBmp } from "../src/server/covers/raster.ts";
 
-export async function makePng(width = 60, height = 90, color = { r: 200, g: 40, b: 40 }): Promise<Uint8Array> {
-  return new Uint8Array(
-    await sharp({ create: { width, height, channels: 3, background: color } })
-      .png()
-      .toBuffer(),
-  );
+type Rgb = { r: number; g: number; b: number };
+
+/** Solid-colour image as BMP, which Bun.Image can re-encode. */
+function solid(width: number, height: number, { r, g, b }: Rgb): Uint8Array {
+  const rgb = new Uint8Array(width * height * 3);
+  for (let i = 0; i < rgb.length; i += 3) rgb.set([r, g, b], i);
+  return rgbToBmp(rgb, width, height);
 }
 
-export async function makeJpeg(width = 60, height = 90, color = { r: 40, g: 40, b: 200 }): Promise<Uint8Array> {
-  return new Uint8Array(
-    await sharp({ create: { width, height, channels: 3, background: color } })
-      .jpeg()
-      .toBuffer(),
-  );
+export async function makePng(width = 60, height = 90, color: Rgb = { r: 200, g: 40, b: 40 }): Promise<Uint8Array> {
+  return new Bun.Image(solid(width, height, color)).png().bytes();
+}
+
+export async function makeJpeg(width = 60, height = 90, color: Rgb = { r: 40, g: 40, b: 200 }): Promise<Uint8Array> {
+  return new Bun.Image(solid(width, height, color)).jpeg().bytes();
 }
 
 // ---- PDF ----------------------------------------------------------------------

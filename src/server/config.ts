@@ -25,7 +25,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: Number(env.BOOKSHELF_PORT || env.PORT || 3000),
     hostname: env.BOOKSHELF_HOST || "0.0.0.0",
     envLibraryRoot: env.BOOKSHELF_LIBRARY_ROOT ? resolve(env.BOOKSHELF_LIBRARY_ROOT) : null,
-    isProduction: env.NODE_ENV === "production",
+    // `process.env.NODE_ENV` is inlined as "production" by `scripts/build.ts`, so the compiled binary is always production.
+    isProduction: env.NODE_ENV === "production" || process.env.NODE_ENV === "production",
     maxUploadBytes: Number(env.BOOKSHELF_MAX_UPLOAD_MB || 16 * 1024) * 1024 * 1024,
   };
 }

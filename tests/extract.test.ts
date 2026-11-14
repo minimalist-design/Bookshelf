@@ -2,7 +2,6 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import sharp from "sharp";
 import { detectExternalTools } from "../src/server/config.ts";
 import { extractCbr, extractCbz } from "../src/server/extract/comic.ts";
 import { extractDjvu, parseDjvuMeta } from "../src/server/extract/djvu.ts";
@@ -29,7 +28,7 @@ function write(name: string, data: Uint8Array | string): string {
 }
 
 async function imageSize(data: Uint8Array | undefined) {
-  const m = await sharp(data!).metadata();
+  const m = await new Bun.Image(data!).metadata();
   return [m.width, m.height];
 }
 

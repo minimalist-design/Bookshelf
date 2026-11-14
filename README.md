@@ -36,6 +36,7 @@ exist. Delete a file in your file manager and it disappears from the library; co
 bun install
 bun run dev        # development: hot reload, http://localhost:3000
 bun run start      # production
+bun run build      # single-file executable in dist/ (see below)
 ```
 
 On first start the web UI asks for the library directory (a server-side folder browser). It can be changed later in
@@ -52,6 +53,32 @@ On first start the web UI asks for the library directory (a server-side folder b
 > **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
 > the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`
 > WebSocket).
+
+## Standalone executable and systemd
+
+`bun run build` compiles everything (server, web app, pdf.js assets and the Bun runtime) into a single
+self-contained executable, `dist/bookshelf` (~115 MB), which needs neither Bun nor `node_modules` to run. It is
+built for the current platform; pass e.g. `--target=linux-arm64 --outfile=dist/bookshelf-arm64` to cross-compile.
+It always runs in production mode, and is configured with the same environment variables as above. The optional
+tools are still found on `PATH`.
+
+To run it as a systemd user service:
+
+```sh
+bun run build
+install -Dm755 dist/bookshelf ~/.local/bin/bookshelf
+install -Dm644 contrib/bookshelf.service ~/.config/systemd/user/bookshelf.service
+systemctl --user edit bookshelf          # optional: set Environment=BOOKSHELF_… overrides
+systemctl --user daemon-reload
+systemctl --user enable --now bookshelf
+loginctl enable-linger "$USER"           # keep it running when you are not logged in (and start at boot)
+journalctl --user -u bookshelf -f        # logs
+```
+
+To update, rebuild, `install` the new binary again and `systemctl --user restart bookshelf`.
+
+At startup pdf.js prints warnings about `@napi-rs/canvas`, `DOMMatrix` and `Path2D`. They are harmless: the server
+only reads PDF metadata and never renders with pdf.js.
 
 ## How it behaves
 

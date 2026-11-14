@@ -1,5 +1,5 @@
-import sharp from "sharp";
 import type { ExternalTools } from "../config.ts";
+import { rgbToBmp } from "../covers/raster.ts";
 import type { RawMetadata } from "../metadata/types.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
@@ -44,7 +44,7 @@ export async function extractDjvu(path: string, tools: ExternalTools): Promise<R
   return out;
 }
 
-/** Binary PPM (P6, 8-bit) → JPEG via sharp's raw input. */
+/** Binary PPM (P6, 8-bit) → JPEG (wrapped as BMP, which Bun.Image decodes). */
 export async function ppmToJpeg(ppm: Uint8Array): Promise<Uint8Array | null> {
   const header = new TextDecoder("latin1").decode(ppm.subarray(0, 64));
   const m = /^P6\s+(?:#[^\n]*\n\s*)*(\d+)\s+(\d+)\s+(\d+)\s/.exec(header);
@@ -53,5 +53,5 @@ export async function ppmToJpeg(ppm: Uint8Array): Promise<Uint8Array | null> {
   const height = Number(m[2]);
   const pixels = ppm.subarray(m[0].length, m[0].length + width * height * 3);
   if (pixels.length !== width * height * 3) return null;
-  return new Uint8Array(await sharp(pixels, { raw: { width, height, channels: 3 } }).jpeg({ quality: 88 }).toBuffer());
+  return new Bun.Image(rgbToBmp(pixels, width, height)).jpeg({ quality: 88 }).bytes();
 }

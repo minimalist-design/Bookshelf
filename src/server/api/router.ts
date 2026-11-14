@@ -6,8 +6,7 @@ import { handle, json, readJson } from "./http.ts";
 import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
 import { CONTENT_TYPES, contentDisposition, serveFile } from "./files.ts";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { PDFJS_KINDS, pdfjsAssetPath } from "./pdfjsAssets.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
@@ -199,21 +198,10 @@ function bookFile(app: AppContext, req: Bun.BunRequest<"/api/books/:id/files/:ha
   });
 }
 
-const PDFJS_DIR = dirname(Bun.resolveSync("pdfjs-dist/package.json", import.meta.dir));
-const PDFJS_KINDS: Record<string, { dir: string; type: string }> = {
-  build: { dir: "legacy/build", type: "text/javascript" },
-  cmaps: { dir: "cmaps", type: "application/octet-stream" },
-  standard_fonts: { dir: "standard_fonts", type: "application/octet-stream" },
-};
-
 /** pdf.js worker, CMaps and standard fonts for the browser PDF reader (fixed directories, plain names only). */
 function pdfjsAsset(req: Bun.BunRequest<"/vendor/pdfjs/:kind/:name">): Response {
-  const kind = PDFJS_KINDS[req.params.kind];
-  const name = req.params.name;
-  if (!kind || !/^[\w.-]+$/.test(name) || name.startsWith(".") || (req.params.kind === "build" && !/^pdf\.worker(\.min)?\.mjs$/.test(name))) {
-    return json({ error: "Not found" }, { status: 404 });
-  }
-  const path = join(PDFJS_DIR, kind.dir, name);
-  if (!existsSync(path)) return json({ error: "Not found" }, { status: 404 });
-  return serveFile(req, path, { contentType: kind.type, etag: `pdfjs-${name}`, cacheControl: "public, max-age=86400" });
+  const { kind, name } = req.params;
+  const path = pdfjsAssetPath(kind, name);
+  if (!path) return json({ error: "Not found" }, { status: 404 });
+  return serveFile(req, path, { contentType: PDFJS_KINDS[kind]!.type, etag: `pdfjs-${name}`, cacheControl: "public, max-age=86400" });
 }

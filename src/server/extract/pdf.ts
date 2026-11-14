@@ -1,10 +1,17 @@
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
+// @ts-expect-error -- the worker module ships without type declarations
+import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
 import type { RawMetadata } from "../metadata/types.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import { cover } from "./images.ts";
 import { run } from "./subprocess.ts";
 import { htmlToText, normalizeDate } from "./text.ts";
+
+// Outside a browser pdf.js runs its worker in-process, loading it with a runtime `import("./pdf.worker.mjs")`
+// unless the module is already registered here. Registering it statically lets the bundler include it, which the
+// compiled single-file binary needs.
+(globalThis as { pdfjsWorker?: unknown }).pdfjsWorker = pdfjsWorker;
 
 const DOI_IN_TEXT = /\b(10\.\d{4,9}\/[^\s"<>,;]+)/;
 const ISBN_IN_TEXT = /\bISBN(?:-1[03])?:?\s*((?:97[89][\s-]?)?\d[\d\s-]{8,14}[\dXx])\b/i;

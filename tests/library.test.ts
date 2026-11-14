@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import sharp from "sharp";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import { listLibrary, listShelves } from "../src/server/library/queries.ts";
@@ -288,7 +287,7 @@ describe("embedded metadata and covers", () => {
     expect(e).toMatchObject({ title: "Embedded Title", authors: ["Embedded Author"], isbn13: "9780441172719", tags: ["Classic"], metadataSource: "embedded" });
     await waitFor(() => app.books.get(e.id)!.hasCover);
     expect(app.covers.exists(e.id)).toBe(true);
-    const thumb = await sharp(app.covers.path(e.id, "thumb")).metadata();
+    const thumb = await new Bun.Image(app.covers.path(e.id, "thumb")).metadata();
     expect([thumb.width, thumb.height, thumb.format]).toEqual([300, 450, "webp"]);
 
     const p = list(app, { q: "Paper" }).items[0]!;

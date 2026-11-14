@@ -66,7 +66,7 @@ src/
       retention.ts        # last-file-gone → keep/delete row (grace period)
       hasher.ts           # streaming SHA-256 (Bun.CryptoHasher)
       paths.ts            # shelf resolution, path-traversal guards
-    covers/store.ts       # extract/download → data/covers/{id}.jpg + thumb .webp (sharp)
+    covers/store.ts       # extract/download → data/covers/{id}.jpg + thumb .webp (Bun.Image)
     sources/
       http.ts             # throttled fetch per host, response cache, backoff
       openlibrary.ts      # ISBN + search → Metadata candidates
@@ -96,7 +96,7 @@ It must not be inside the library root (validated when the root is set).
 
 Libraries: `react`, `react-dom`, `@mantine/core|hooks|dropzone|notifications`, `@tanstack/react-query`,
 `react-router`, `fast-xml-parser`, `fflate` (zip), `pdfjs-dist` (server metadata + web reader),
-`react-reader`/`epubjs` (EPUB reader), `sharp` (thumbnails).
+`react-reader`/`epubjs` (EPUB reader), `Bun.Image` (thumbnails; built in, no native module).
 
 ---
 
@@ -216,7 +216,7 @@ skipped if the root is inaccessible or the scan found 0 files while rows exist. 
 | PDF | pdfjs-dist `getMetadata()` | Info dict Title/Author/Subject/Keywords + XMP dc:*, prism:doi | `pdftoppm -f 1 -l 1` if available |
 | CBZ | `ComicInfo.xml` | Title, Series, Number, Writer, Year, Summary, Publisher, GTIN(ISBN), Tags | first image (natural sort) |
 | CBR | `7z`/`unrar` → ComicInfo.xml | same as CBZ | first image |
-| DJVU | `djvused -e print-meta` | title, author, year, … | `ddjvu -page=1` → sharp |
+| DJVU | `djvused -e print-meta` | title, author, year, … | `ddjvu -page=1` → Bun.Image |
 | FB2 | `<title-info>`, `<publish-info>` | book-title, authors, genres→tags, annotation, sequence, isbn, lang | `<coverpage>` binary |
 
 **Junk filter** (value treated as empty): titles like `untitled`, `Microsoft Word - …`, `*.doc(x)`, `*.tex`,

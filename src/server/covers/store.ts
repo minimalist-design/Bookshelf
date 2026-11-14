@@ -1,9 +1,16 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import sharp from "sharp";
 import type { CoverImage } from "../metadata/types.ts";
+import { decodePng, flattenOnWhite } from "./raster.ts";
 
 export type CoverSize = "full" | "thumb";
+
+const DECODE: Bun.Image.ConstructorOptions = { maxPixels: 200_000_000 };
+const FULL = [1200, 1800] as const;
+const THUMB = [320, 480] as const;
+const FIT: Bun.Image.ResizeOptions = { fit: "inside", withoutEnlargement: true };
+/** Source formats that may carry transparency, which JPEG cannot hold. */
+const MAY_HAVE_ALPHA = new Set<Bun.Image.Format>(["png", "webp", "gif"]);
 
 /** Cover images live in the data directory, named by book id: `{id}.jpg` and `{id}.thumb.webp`. */
 export class CoverStore {
@@ -22,20 +29,13 @@ export class CoverStore {
   /** Decode, normalize and store a cover. Returns false when the image cannot be decoded. */
   async save(bookId: number, image: CoverImage): Promise<boolean> {
     try {
-      const input = sharp(image.data, { failOn: "none", limitInputPixels: 200_000_000, pages: 1 }).rotate();
-      const meta = await input.metadata();
-      if (!meta.width || !meta.height || meta.width < 16 || meta.height < 16) return false;
-      const full = await input
-        .clone()
-        .resize({ width: 1200, height: 1800, fit: "inside", withoutEnlargement: true })
-        .flatten({ background: "#ffffff" })
-        .jpeg({ quality: 85, mozjpeg: true })
-        .toBuffer();
-      const thumb = await input
-        .clone()
-        .resize({ width: 320, height: 480, fit: "inside", withoutEnlargement: true })
+      const meta = await new Bun.Image(image.data, DECODE).metadata();
+      if (meta.width < 16 || meta.height < 16) return false;
+      const full = await fullJpeg(image.data, meta.format);
+      const thumb = await new Bun.Image(image.data, DECODE)
+        .resize(THUMB[0], THUMB[1], FIT)
         .webp({ quality: 80 })
-        .toBuffer();
+        .bytes();
       this.writeAtomic(this.path(bookId, "full"), full);
       this.writeAtomic(this.path(bookId, "thumb"), thumb);
       return true;
@@ -72,9 +72,21 @@ export class CoverStore {
     }
   }
 
-  private writeAtomic(target: string, data: Buffer): void {
+  private writeAtomic(target: string, data: Uint8Array): void {
     const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, data);
     renameSync(tmp, target);
   }
+}
+
+/** Resized JPEG; transparent sources are composited onto white first (Bun.Image would just drop alpha). */
+async function fullJpeg(data: Uint8Array, format: Bun.Image.Format): Promise<Uint8Array> {
+  const resized = () => new Bun.Image(data, DECODE).resize(FULL[0], FULL[1], FIT);
+  if (MAY_HAVE_ALPHA.has(format)) {
+    const decoded = decodePng(await resized().png({ compressionLevel: 1 }).bytes());
+    if (decoded && (decoded.channels === 2 || decoded.channels === 4)) {
+      return new Bun.Image(flattenOnWhite(decoded)).jpeg({ quality: 85 }).bytes();
+    }
+  }
+  return resized().jpeg({ quality: 85 }).bytes();
 }

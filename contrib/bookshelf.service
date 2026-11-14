@@ -1,0 +1,18 @@
+# systemd user unit for the compiled binary (`bun run build`, then copy dist/bookshelf to ~/.local/bin).
+# Install: see "Standalone executable and systemd" in README.md.
+[Unit]
+Description=Bookshelf ebook library
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/bookshelf
+Restart=on-failure
+RestartSec=5
+# Configuration (see README); %h is your home directory.
+#Environment=BOOKSHELF_LIBRARY_ROOT=%h/Books
+#Environment=BOOKSHELF_PORT=3000
+#Environment=BOOKSHELF_HOST=127.0.0.1
+
+[Install]
+WantedBy=default.target

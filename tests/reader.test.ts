@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import sharp from "sharp";
 import { apiRoutes } from "../src/server/api/router.ts";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
@@ -112,7 +111,7 @@ describe("page images", () => {
     const p1 = await fetch(url(`${base}/1`));
     expect(p1.headers.get("content-type")).toBe("image/png");
     expect(p1.headers.get("cache-control")).toContain("immutable");
-    const meta = await sharp(new Uint8Array(await p1.arrayBuffer())).metadata();
+    const meta = await new Bun.Image(new Uint8Array(await p1.arrayBuffer())).metadata();
     expect([meta.width, meta.height]).toEqual([20, 30]); // p2 before p10
     expect((await fetch(url(`${base}/3`))).status).toBe(404);
     expect((await fetch(url(`${base}/0`))).status).toBe(404);
@@ -129,7 +128,7 @@ describe("page images", () => {
     const f = fileOf("S/Rar Comic -- X.cbr");
     expect(await app.reader.pageCount(f.bookId, f.hash)).toBe(2);
     const p2 = await app.reader.page(f.bookId, f.hash, 2);
-    expect((await sharp(p2.data).metadata()).width).toBe(13);
+    expect((await new Bun.Image(p2.data).metadata()).width).toBe(13);
   });
 
   test.skipIf(!Bun.which("c44") || !Bun.which("ddjvu") || !Bun.which("pdftoppm"))("DJVU pages rendered to JPEG", async () => {
@@ -142,7 +141,7 @@ describe("page images", () => {
     expect(await app.reader.pageCount(f.bookId, f.hash)).toBe(1);
     const p = await app.reader.page(f.bookId, f.hash, 1);
     expect(p.mime).toBe("image/jpeg");
-    expect((await sharp(p.data).metadata()).format).toBe("jpeg");
+    expect((await new Bun.Image(p.data).metadata()).format).toBe("jpeg");
   });
 });
 
