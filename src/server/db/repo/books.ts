@@ -30,6 +30,7 @@ interface BookRow {
   isbn13: string | null;
   doi: string | null;
   publisher: string | null;
+  edition: string | null;
   published_date: string | null;
   year: number | null;
   language: string | null;
@@ -157,9 +158,9 @@ export class BooksRepo {
     return this.db.transaction(() => {
       const res = this.db
         .query(
-          `INSERT INTO books (title, sort_title, subtitle, isbn13, doi, publisher, published_date, year, language,
+          `INSERT INTO books (title, sort_title, subtitle, isbn13, doi, publisher, edition, published_date, year, language,
                               pages, description, series, series_index, metadata_source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           meta.title,
@@ -168,6 +169,7 @@ export class BooksRepo {
           meta.isbn13,
           meta.doi,
           meta.publisher,
+          meta.edition,
           meta.publishedDate,
           meta.year,
           meta.language,
@@ -190,7 +192,7 @@ export class BooksRepo {
     this.db.transaction(() => {
       this.db
         .query(
-          `UPDATE books SET title = ?, sort_title = ?, subtitle = ?, isbn13 = ?, doi = ?, publisher = ?,
+          `UPDATE books SET title = ?, sort_title = ?, subtitle = ?, isbn13 = ?, doi = ?, publisher = ?, edition = ?,
              published_date = ?, year = ?, language = ?, pages = ?, description = ?, series = ?, series_index = ?,
              metadata_source = COALESCE(?, metadata_source),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -203,6 +205,7 @@ export class BooksRepo {
           meta.isbn13,
           meta.doi,
           meta.publisher,
+          meta.edition,
           meta.publishedDate,
           meta.year,
           meta.language,
@@ -342,6 +345,7 @@ function toRecord(r: BookRow): BookRecord {
     isbn13: r.isbn13,
     doi: r.doi,
     publisher: r.publisher,
+    edition: r.edition,
     publishedDate: r.published_date,
     year: r.year,
     language: r.language,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { formatEdition } from "../src/shared/edition.ts";
 import { authorsForFilename, splitAuthors, toDisplayName, toSortName } from "../src/server/naming/authors.ts";
 import { buildLibraryFilename, MAX_FILENAME_BYTES, withCollisionSuffix } from "../src/server/naming/buildFilename.ts";
 import { doiCandidatesFromFilename, doiFromFilename, doiToFilename, normalizeDoi } from "../src/server/naming/doi.ts";
@@ -233,5 +234,16 @@ describe("sanitize + build", () => {
   test("collision suffix", () => {
     expect(withCollisionSuffix("A - T [1].epub", ".epub", 2)).toBe("A - T [1] (2).epub");
     expect(withCollisionSuffix("A - T.epub", ".epub", 1)).toBe("A - T.epub");
+  });
+});
+
+describe("formatEdition", () => {
+  test("bare numbers become ordinals; text is kept", () => {
+    expect(["1", "2", "3", "4", "11", "12", "13", "21", "22", "102", "111"].map(formatEdition)).toEqual([
+      "1st edition", "2nd edition", "3rd edition", "4th edition", "11th edition", "12th edition", "13th edition",
+      "21st edition", "22nd edition", "102nd edition", "111th edition",
+    ]);
+    expect(formatEdition("Revised")).toBe("Revised");
+    expect(formatEdition(" 2nd ed. ")).toBe("2nd ed.");
   });
 });

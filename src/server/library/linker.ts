@@ -187,6 +187,7 @@ function pickMetadata(m: BookMetadata): BookMetadata {
     isbn13: m.isbn13,
     doi: m.doi,
     publisher: m.publisher,
+    edition: m.edition,
     publishedDate: m.publishedDate,
     year: m.year,
     language: m.language,

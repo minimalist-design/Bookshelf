@@ -57,6 +57,7 @@ function toCandidate(w: WorkRecord, doi: string, via: "crossref" | "doi.org", ma
     // DOIs are case-insensitive; keep the spelling the book already uses when they match.
     doi: normalizeDoi(w.DOI)?.toLowerCase() === doi.toLowerCase() ? doi : (normalizeDoi(w.DOI) ?? doi),
     publisher: w.publisher?.trim() || null,
+    edition: null,
     publishedDate: dateFromParts(w.issued?.["date-parts"]) ?? dateFromParts(w.published?.["date-parts"]),
     language: normalizeLanguage(w.language),
     pages: null, // Crossref "page" is a page range, not a count

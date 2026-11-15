@@ -330,6 +330,7 @@ export function applyPatch(current: BookRecord, p: BookUpdate): BookMetadata {
     isbn13: current.isbn13,
     doi: current.doi,
     publisher: current.publisher,
+    edition: current.edition,
     publishedDate: current.publishedDate,
     year: current.year,
     language: current.language,
@@ -360,6 +361,7 @@ export function applyPatch(current: BookRecord, p: BookUpdate): BookMetadata {
     if (raw !== null && !next.doi) throw new ValidationError("Not a valid DOI (expected 10.xxxx/…)");
   }
   if (has("publisher")) next.publisher = optionalText(p.publisher, "Publisher");
+  if (has("edition")) next.edition = optionalText(p.edition, "Edition");
   if (has("publishedDate")) {
     const raw = optionalText(p.publishedDate, "Published date");
     next.publishedDate = raw === null ? null : normalizeDate(raw);
@@ -386,6 +388,7 @@ function fillEmpty(target: BookRecord, source: BookRecord): BookMetadata {
     isbn13: pick(target.isbn13, source.isbn13),
     doi: pick(target.doi, source.doi),
     publisher: pick(target.publisher, source.publisher),
+    edition: pick(target.edition, source.edition),
     publishedDate: pick(target.publishedDate, source.publishedDate),
     year: pick(target.year, source.year),
     language: pick(target.language, source.language),

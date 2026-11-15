@@ -31,7 +31,7 @@ describe("database", () => {
     for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache"]) {
       expect(names).toContain(t);
     }
-    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
   });
 });
 

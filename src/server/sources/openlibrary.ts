@@ -1,3 +1,4 @@
+import { formatEdition } from "../../shared/edition.ts";
 import type { CandidateMetadata, MetadataCandidate } from "../../shared/types.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import type { HttpClient } from "./http.ts";
@@ -20,6 +21,7 @@ interface OlBooksData {
 }
 interface OlEdition {
   subtitle?: string;
+  edition_name?: string;
   works?: { key: string }[];
   languages?: { key: string }[];
   series?: string[];
@@ -57,7 +59,7 @@ function cleanDescription(s: string | null): string | null {
 
 function empty(): CandidateMetadata {
   return {
-    title: null, subtitle: null, authors: [], isbn13: null, doi: null, publisher: null, publishedDate: null,
+    title: null, subtitle: null, authors: [], isbn13: null, doi: null, publisher: null, edition: null, publishedDate: null,
     language: null, pages: null, description: null, series: null, seriesIndex: null, tags: [],
   };
 }
@@ -89,6 +91,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
     const ed = await http.getJson<OlEdition>(`${OL}/books/${editionKey}.json`).catch(() => null);
     if (ed) {
       m.subtitle ??= ed.subtitle?.trim() || null;
+      m.edition = ed.edition_name?.replace(/\s+/g, " ").trim() || null;
       m.language = normalizeLanguage(ed.languages?.[0]?.key);
       const series = parseSeries(ed.series?.[0]);
       m.series = series.series;
@@ -111,7 +114,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
     match: "isbn",
     id: editionKey ?? `ISBN:${isbn13}`,
     url: editionKey ? `${OL}/books/${editionKey}` : (rec.url ?? `${OL}/isbn/${isbn13}`),
-    label: label([m.publisher, m.publishedDate?.slice(0, 4), m.pages ? `${m.pages} pages` : null]),
+    label: label([m.publisher, m.edition ? formatEdition(m.edition) : null, m.publishedDate?.slice(0, 4), m.pages ? `${m.pages} pages` : null]),
     metadata: m,
     coverUrl,
     olEditionKey: editionKey,

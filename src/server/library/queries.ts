@@ -66,6 +66,7 @@ export function toDetail(b: BookRecord, files: IndexedFile[]): BookDetailDto {
   return {
     ...toSummary(b, files),
     publisher: b.publisher,
+    edition: b.edition,
     publishedDate: b.publishedDate,
     language: b.language,
     pages: b.pages,

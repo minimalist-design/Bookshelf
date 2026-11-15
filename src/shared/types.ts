@@ -81,6 +81,8 @@ export interface BookSummaryDto {
 
 export interface BookDetailDto extends BookSummaryDto {
   publisher: string | null;
+  /** Free-text edition statement; a bare number means "Nth edition" (see formatEdition). */
+  edition: string | null;
   publishedDate: string | null;
   language: string | null;
   pages: number | null;
@@ -194,6 +196,7 @@ export interface BookUpdate {
   isbn13?: string | null;
   doi?: string | null;
   publisher?: string | null;
+  edition?: string | null;
   publishedDate?: string | null;
   language?: string | null;
   pages?: number | null;
@@ -275,6 +278,7 @@ export const METADATA_FIELDS = [
   "isbn13",
   "doi",
   "publisher",
+  "edition",
   "publishedDate",
   "language",
   "pages",
@@ -292,6 +296,7 @@ export interface CandidateMetadata {
   isbn13: string | null;
   doi: string | null;
   publisher: string | null;
+  edition: string | null;
   publishedDate: string | null;
   language: string | null;
   pages: number | null;

@@ -37,6 +37,7 @@ import {
 } from "@tabler/icons-react";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
+import { formatEdition } from "../../shared/edition.ts";
 import type { BookDetailDto, BookFileDto } from "../../shared/types.ts";
 import { api } from "../api/client.ts";
 import { useBook, useInvalidateBooks, useUpdateBook } from "../api/hooks.ts";
@@ -162,6 +163,7 @@ function BookView({ book }: { book: BookDetailDto }) {
         {book.seriesIndex != null ? ` #${book.seriesIndex}` : ""}
       </Anchor>,
     ]);
+  if (book.edition) facts.push(["Edition", formatEdition(book.edition)]);
   if (book.publisher) facts.push(["Publisher", book.publisher]);
   if (book.publishedDate) facts.push(["Published", book.publishedDate]);
   if (book.language) facts.push(["Language", book.language]);

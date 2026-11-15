@@ -30,6 +30,7 @@ export const FIELD_LABELS: Record<MetadataField, string> = {
   isbn13: "ISBN",
   doi: "DOI",
   publisher: "Publisher",
+  edition: "Edition",
   publishedDate: "Published",
   language: "Language",
   pages: "Pages",

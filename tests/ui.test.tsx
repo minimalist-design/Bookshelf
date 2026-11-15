@@ -35,6 +35,7 @@ const book: BookDetailDto = {
   shelves: ["Fiction"],
   progress: 0.42,
   publisher: "Ace",
+  edition: "2",
   publishedDate: "1965-08-01",
   language: "en",
   pages: 412,
@@ -86,7 +87,7 @@ const review: ReviewItemDto[] = [
           coverUrl: "https://covers.openlibrary.org/b/id/1-L.jpg",
           olEditionKey: "OL1M",
           olWorkKey: "OL1W",
-          metadata: { title: "Dune", subtitle: null, authors: ["Frank Herbert"], isbn13: "9780441172719", doi: null, publisher: "Ace Books", publishedDate: "2020", language: "en", pages: 896, description: "Arrakis.", series: null, seriesIndex: null, tags: ["Fiction"] },
+          metadata: { title: "Dune", subtitle: null, authors: ["Frank Herbert"], isbn13: "9780441172719", doi: null, publisher: "Ace Books", edition: null, publishedDate: "2020", language: "en", pages: 896, description: "Arrakis.", series: null, seriesIndex: null, tags: ["Fiction"] },
           diff: [
             { field: "title", current: "Dune", candidate: "Dune", status: "same" },
             { field: "publisher", current: "Ace", candidate: "Ace Books", status: "conflict" },
@@ -103,7 +104,7 @@ const review: ReviewItemDto[] = [
           coverUrl: null,
           olEditionKey: null,
           olWorkKey: null,
-          metadata: { title: "Dune (other)", subtitle: null, authors: [], isbn13: null, doi: "10.1/x", publisher: null, publishedDate: null, language: null, pages: null, description: null, series: null, seriesIndex: null, tags: [] },
+          metadata: { title: "Dune (other)", subtitle: null, authors: [], isbn13: null, doi: "10.1/x", publisher: null, edition: null, publishedDate: null, language: null, pages: null, description: null, series: null, seriesIndex: null, tags: [] },
           diff: [],
         },
       ],
@@ -170,6 +171,7 @@ describe("UI render smoke", () => {
     expect(html).toContain("From the file");
     expect(html).toContain("x.pdf");
     expect(html).toContain("Reread");
+    expect(html).toContain("2nd edition");
   });
 
   test("review queue with candidate comparison", () => {

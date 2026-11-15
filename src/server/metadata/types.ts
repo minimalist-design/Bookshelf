@@ -6,6 +6,8 @@ export interface BookMetadata {
   isbn13: string | null;
   doi: string | null;
   publisher: string | null;
+  /** Free-text edition statement ("2", "2nd", "Revised"…). */
+  edition: string | null;
   publishedDate: string | null;
   year: number | null;
   language: string | null;
@@ -39,6 +41,7 @@ export function emptyMetadata(title: string): BookMetadata {
     isbn13: null,
     doi: null,
     publisher: null,
+    edition: null,
     publishedDate: null,
     year: null,
     language: null,

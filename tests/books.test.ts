@@ -68,6 +68,10 @@ describe("edit", () => {
     expect(r.book).toMatchObject({ rating: 4, tags: ["Fav", "SciFi"], notes: "Great", series: "S", seriesIndex: 2, confirmedSource: "manual" });
     expect(shelfFiles()).toEqual(["Book -- Author.epub"]);
 
+    expect((await app.bookService.update(id, { edition: "  2nd   ed. " })).book.edition).toBe("2nd ed.");
+    expect((await app.bookService.update(id, { edition: "" })).book.edition).toBeNull();
+    expect(shelfFiles()).toEqual(["Book -- Author.epub"]);
+
     rmSync(join(root, "Shelf/Book -- Author.epub"));
     await Bun.sleep(FAST.graceMs + 400);
     expect(app.books.exists(id)).toBe(true);

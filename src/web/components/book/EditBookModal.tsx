@@ -26,6 +26,7 @@ type FormState = {
   isbn13: string;
   doi: string;
   publisher: string;
+  edition: string;
   publishedDate: string;
   language: string;
   pages: number | string;
@@ -45,6 +46,7 @@ function fromBook(b: BookDetailDto): FormState {
     isbn13: b.isbn13 ?? "",
     doi: b.doi ?? "",
     publisher: b.publisher ?? "",
+    edition: b.edition ?? "",
     publishedDate: b.publishedDate ?? "",
     language: b.language ?? "",
     pages: b.pages ?? "",
@@ -69,6 +71,7 @@ function diff(book: BookDetailDto, f: FormState): BookUpdate {
   if (text(f.isbn13) !== book.isbn13) out.isbn13 = text(f.isbn13);
   if (text(f.doi) !== book.doi) out.doi = text(f.doi);
   if (text(f.publisher) !== book.publisher) out.publisher = text(f.publisher);
+  if (text(f.edition) !== book.edition) out.edition = text(f.edition);
   if (text(f.publishedDate) !== book.publishedDate) out.publishedDate = text(f.publishedDate);
   if (text(f.language) !== book.language) out.language = text(f.language);
   if (num(f.pages) !== book.pages) out.pages = num(f.pages);
@@ -153,8 +156,11 @@ export function EditBookModal({ book, opened, onClose }: { book: BookDetailDto; 
             <Grid.Col span={{ base: 12, sm: 6 }}>
               <TextInput label="DOI" description="10.xxxx/… or a doi.org link" value={f.doi} onChange={(e) => set("doi", e.currentTarget.value)} ff="monospace" />
             </Grid.Col>
-            <Grid.Col span={{ base: 12, sm: 5 }}>
+            <Grid.Col span={{ base: 12, sm: 6 }}>
               <Autocomplete label="Publisher" data={names(facets.data?.publishers)} value={f.publisher} onChange={(v) => set("publisher", v)} />
+            </Grid.Col>
+            <Grid.Col span={{ base: 6, sm: 3 }}>
+              <TextInput label="Edition" placeholder="2, Revised…" value={f.edition} onChange={(e) => set("edition", e.currentTarget.value)} />
             </Grid.Col>
             <Grid.Col span={{ base: 6, sm: 3 }}>
               <TextInput label="Published" placeholder="YYYY-MM-DD" value={f.publishedDate} onChange={(e) => set("publishedDate", e.currentTarget.value)} />
@@ -165,10 +171,10 @@ export function EditBookModal({ book, opened, onClose }: { book: BookDetailDto; 
             <Grid.Col span={{ base: 6, sm: 2 }}>
               <NumberInput label="Pages" min={1} allowDecimal={false} value={f.pages} onChange={(v) => set("pages", v)} />
             </Grid.Col>
-            <Grid.Col span={{ base: 12, sm: 8 }}>
+            <Grid.Col span={{ base: 12, sm: 5 }}>
               <Autocomplete label="Series" data={names(facets.data?.series)} value={f.series} onChange={(v) => set("series", v)} />
             </Grid.Col>
-            <Grid.Col span={{ base: 6, sm: 4 }}>
+            <Grid.Col span={{ base: 6, sm: 3 }}>
               <NumberInput label="Number in series" min={0} decimalScale={2} disabled={!f.series.trim()} value={f.seriesIndex} onChange={(v) => set("seriesIndex", v)} />
             </Grid.Col>
             <Grid.Col span={{ base: 12, sm: 9 }}>

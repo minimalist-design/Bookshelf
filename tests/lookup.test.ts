@@ -75,10 +75,10 @@ describe("sources (recorded responses)", () => {
     const http = new HttpClient(null, () => null, { fetchImpl, sleep: noSleep });
     const c = (await openLibraryByIsbn(http, "9780441172719"))!;
     expect(c).toMatchObject({ source: "openlibrary", match: "isbn", olEditionKey: "OL59726263M", olWorkKey: "OL893414W", coverUrl: "https://covers.openlibrary.org/b/id/15110282-L.jpg" });
-    expect(c.metadata).toMatchObject({ title: "Dune", authors: ["Frank Herbert"], isbn13: "9780441172719", publisher: "Ace", publishedDate: "2020", pages: 896, language: "en" });
+    expect(c.metadata).toMatchObject({ title: "Dune", authors: ["Frank Herbert"], isbn13: "9780441172719", publisher: "Ace", edition: "91st printing", publishedDate: "2020", pages: 896, language: "en" });
     expect(c.metadata.description).toStartWith("Set on the desert planet Arrakis");
     expect(c.metadata.tags).not.toContain("New York Times reviewed");
-    expect(c.label).toBe("Open Library · Ace · 2020 · 896 pages");
+    expect(c.label).toBe("Open Library · Ace · 91st printing · 2020 · 896 pages");
     expect(calls.map((x) => new URL(x.url).pathname)).toEqual(["/api/books", "/books/OL59726263M.json", "/works/OL893414W.json"]);
     expect(await openLibraryByIsbn(http, "9780131103627")).toBeNull();
   });
@@ -187,10 +187,10 @@ describe("lookup service", () => {
     expect(r.candidates).toHaveLength(1);
     const c = r.candidates[0]!;
     const status = Object.fromEntries(c.diff.map((d) => [d.field, d.status]));
-    expect(status).toMatchObject({ title: "same", authors: "same", isbn13: "same", publisher: "fill", pages: "fill", language: "fill", description: "fill", doi: "missing" });
+    expect(status).toMatchObject({ title: "same", authors: "same", isbn13: "same", publisher: "fill", edition: "fill", pages: "fill", language: "fill", description: "fill", doi: "missing" });
 
-    const applied = await app.lookup.apply(id, { candidate: c, fields: ["publisher", "pages", "language", "description", "doi"], cover: true });
-    expect(applied.book).toMatchObject({ publisher: "Ace", pages: 896, language: "en", confirmedSource: "openlibrary", olEditionKey: "OL59726263M", olWorkKey: "OL893414W", hasCover: true });
+    const applied = await app.lookup.apply(id, { candidate: c, fields: ["publisher", "edition", "pages", "language", "description", "doi"], cover: true });
+    expect(applied.book).toMatchObject({ publisher: "Ace", edition: "91st printing", pages: 896, language: "en", confirmedSource: "openlibrary", olEditionKey: "OL59726263M", olWorkKey: "OL893414W", hasCover: true });
     expect(applied.renamed).toEqual([]);
     expect(app.books.get(id)!.coverSource).toBe("openlibrary");
     expect(calls.some((x) => x.url.includes("covers.openlibrary.org") && x.url.includes("default=false"))).toBe(true);

@@ -109,7 +109,7 @@ books(
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL, sort_title TEXT, subtitle TEXT,
   isbn13 TEXT, doi TEXT,
-  publisher TEXT, published_date TEXT, year INTEGER, language TEXT, pages INTEGER,
+  publisher TEXT, edition TEXT, published_date TEXT, year INTEGER, language TEXT, pages INTEGER,
   description TEXT,
   series TEXT, series_index REAL,
   rating INTEGER CHECK (rating BETWEEN 0 AND 5), notes TEXT,
@@ -261,7 +261,7 @@ viewed; unsupported files are rejected client-side).
 ## 8. External metadata sources (implemented)
 
 **Open Library** — by ISBN: `api/books?jscmd=data` (title, authors, publisher, date, pages, subjects, cover), then that
-same edition's `/books/{OLID}.json` (language, series, work key — *not* `/isbn/`, which may resolve to another edition of
+same edition's `/books/{OLID}.json` (language, series, edition name, work key — *not* `/isbn/`, which may resolve to another edition of
 the same ISBN), then `/works/{key}.json` for description/subjects if still missing. Search: `/search.json` gives
 work-level candidates (no ISBN: a work spans many editions). Covers from `covers.openlibrary.org` (`?default=false`).
 
