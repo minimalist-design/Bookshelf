@@ -1,7 +1,7 @@
 import type { AppContext } from "../app.ts";
 import type { ApplyMetadataRequest, BookUpdate, LookupSource, SettingsUpdate } from "../../shared/types.ts";
 import { ValidationError } from "../library/paths.ts";
-import { browseDirectories } from "./fsBrowse.ts";
+import { browseDirectories, makeDirectory } from "./fsBrowse.ts";
 import { handle, json, readJson } from "./http.ts";
 import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
@@ -17,6 +17,12 @@ export function apiRoutes(app: AppContext) {
     },
     "/api/fs/browse": {
       GET: handle((req) => json(browseDirectories(new URL(req.url).searchParams.get("path")))),
+    },
+    "/api/fs/mkdir": {
+      POST: handle(async (req) => {
+        const body = await readJson<{ parent: unknown; name: unknown }>(req);
+        return json(makeDirectory(body.parent, body.name), { status: 201 });
+      }),
     },
     "/api/library": { GET: handle((req) => json(libraryPage(app, new URL(req.url)))) },
     "/api/library/status": { GET: () => json(app.library.status()) },

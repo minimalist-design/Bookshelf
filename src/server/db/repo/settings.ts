@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export const SETTING_KEYS = ["libraryRoot", "contactEmail"] as const;
+export const SETTING_KEYS = ["libraryRoot", "contactEmail", "envLibraryRootSeen"] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
 export class SettingsRepo {

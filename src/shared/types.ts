@@ -19,6 +19,8 @@ export interface SettingsDto {
 
 export interface SettingsUpdate {
   libraryRoot?: string;
+  /** Create `libraryRoot` (and missing parents) when it does not exist yet; used by first-run setup. */
+  createLibraryRoot?: boolean;
   contactEmail?: string | null;
 }
 

@@ -1,8 +1,10 @@
 import index from "../web/index.html";
 import { createApp } from "./app.ts";
 import { apiRoutes } from "./api/router.ts";
+import { prepareEnvLibraryRoot } from "./api/settings.ts";
 
 const app = createApp();
+prepareEnvLibraryRoot(app);
 const EVENTS_TOPIC = "events";
 
 const server = Bun.serve({

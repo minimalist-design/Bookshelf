@@ -18,9 +18,10 @@ export function Setup() {
           </div>
           {update.isError && <Alert color="red">{update.error.message}</Alert>}
           <DirectoryPicker
+            createMissing
             confirmLabel="Use this directory"
             busy={update.isPending}
-            onConfirm={(libraryRoot) => update.mutate({ libraryRoot })}
+            onConfirm={(libraryRoot) => update.mutate({ libraryRoot, createLibraryRoot: true })}
           />
         </Stack>
       </Paper>

@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
-import { getSettings, updateSettings } from "../src/server/api/settings.ts";
+import { getSettings, prepareEnvLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
+import { browseDirectories, makeDirectory } from "../src/server/api/fsBrowse.ts";
+import { ConflictError, NotFoundError } from "../src/server/api/http.ts";
 import { validateShelfName, ValidationError } from "../src/server/library/paths.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "bookshelf-test-"));
@@ -46,6 +48,30 @@ describe("settings", () => {
     expect(() => updateSettings(app, { libraryRoot: app.config.dataDir })).toThrow(ValidationError);
   });
 
+  test("setup can create a missing library root", () => {
+    const app = makeApp();
+    const lib = join(tmp, "created", "nested", "lib");
+    expect(() => updateSettings(app, { libraryRoot: lib })).toThrow(ValidationError);
+    expect(existsSync(lib)).toBe(false);
+    expect(updateSettings(app, { libraryRoot: lib, createLibraryRoot: true }).libraryRoot).toBe(lib);
+    expect(existsSync(lib)).toBe(true);
+    // Placement rules are checked before creating anything.
+    const insideData = join(app.config.dataDir, "lib");
+    expect(() => updateSettings(app, { libraryRoot: insideData, createLibraryRoot: true })).toThrow(/data directory/);
+    expect(existsSync(insideData)).toBe(false);
+    expect(() => updateSettings(app, { libraryRoot: "relative/x", createLibraryRoot: true })).toThrow(ValidationError);
+  });
+
+  test("a missing env library root is created only the first time", () => {
+    const lib = join(tmp, "envcreated", "lib");
+    const app = makeApp({ BOOKSHELF_LIBRARY_ROOT: lib });
+    prepareEnvLibraryRoot(app);
+    expect(existsSync(lib)).toBe(true);
+    rmSync(lib, { recursive: true });
+    prepareEnvLibraryRoot(app); // e.g. drive unmounted later: leave it missing
+    expect(existsSync(lib)).toBe(false);
+  });
+
   test("env override wins and locks the setting", () => {
     const lib = join(tmp, "envlib");
     mkdirSync(lib, { recursive: true });
@@ -66,5 +92,24 @@ describe("shelf names", () => {
   test("validation", () => {
     expect(validateShelfName("  Science Fiction ")).toBe("Science Fiction");
     for (const bad of ["", "..", ".hidden", "a/b", "a\\b"]) expect(() => validateShelfName(bad)).toThrow(ValidationError);
+  });
+});
+
+describe("directory browser", () => {
+  test("missing directory is a 404", () => {
+    expect(() => browseDirectories(join(tmp, "nope"))).toThrow(NotFoundError);
+  });
+
+  test("create a folder", () => {
+    const parent = join(tmp, "mkdir-parent");
+    mkdirSync(parent, { recursive: true });
+    const { path } = makeDirectory(parent, " Books ");
+    expect(path).toBe(join(parent, "Books"));
+    expect(browseDirectories(parent).dirs.map((d) => d.name)).toEqual(["Books"]);
+    expect(() => makeDirectory(parent, "Books")).toThrow(ConflictError);
+    for (const bad of ["", "..", "../x", "a/b", ".hidden"]) expect(() => makeDirectory(parent, bad)).toThrow(ValidationError);
+    expect(() => makeDirectory(join(tmp, "nope"), "x")).toThrow(NotFoundError);
+    writeFileSync(join(parent, "file"), "");
+    expect(() => makeDirectory(join(parent, "file"), "x")).toThrow(ValidationError);
   });
 });

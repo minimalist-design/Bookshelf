@@ -39,8 +39,10 @@ bun run start      # production
 bun run build      # single-file executable in dist/ (see below)
 ```
 
-On first start the web UI asks for the library directory (a server-side folder browser). It can be changed later in
-*Settings*, or fixed with `BOOKSHELF_LIBRARY_ROOT`.
+On first start the web UI asks for the library directory (a server-side folder browser, which can also create
+folders). A typed path that doesn't exist yet is created, including missing parent folders. It can be changed later in
+*Settings*, or fixed with `BOOKSHELF_LIBRARY_ROOT` — a missing directory given there is created the first time the
+server starts with it; afterwards a missing directory is reported as unavailable (e.g. an unmounted drive).
 
 | Variable | Default | Meaning |
 |---|---|---|

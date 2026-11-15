@@ -55,6 +55,8 @@ export const api = {
   updateSettings: (update: SettingsUpdate) =>
     request<SettingsDto>("/api/settings", { method: "PUT", body: JSON.stringify(update) }),
   browse: (path?: string) => request<BrowseResult>(`/api/fs/browse${qs({ path })}`),
+  mkdir: (parent: string, name: string) =>
+    request<{ path: string }>("/api/fs/mkdir", { method: "POST", body: JSON.stringify({ parent, name }) }),
   getLibrary: (q: LibraryQuery) =>
     request<LibraryPage>(
       `/api/library${qs({

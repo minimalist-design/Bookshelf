@@ -19,7 +19,15 @@ export function useUpdateSettings() {
 }
 
 export const useBrowse = (path: string | undefined) =>
-  useQuery({ queryKey: ["browse", path ?? ""], queryFn: () => api.browse(path) });
+  useQuery({ queryKey: ["browse", path ?? ""], queryFn: () => api.browse(path), retry: false });
+
+export function useMakeDirectory() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ parent, name }: { parent: string; name: string }) => api.mkdir(parent, name),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["browse"] }),
+  });
+}
 
 export const useLibrary = (query: LibraryQuery) =>
   useQuery({ queryKey: ["library", query], queryFn: () => api.getLibrary(query), placeholderData: keepPreviousData });
