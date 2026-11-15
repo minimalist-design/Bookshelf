@@ -18,7 +18,8 @@ export interface SettingsDto {
 }
 
 export interface SettingsUpdate {
-  libraryRoot?: string;
+  /** `null` unlinks the library (nothing on disk is touched); the UI then shows first-run setup again. */
+  libraryRoot?: string | null;
   /** Create `libraryRoot` (and missing parents) when it does not exist yet; used by first-run setup. */
   createLibraryRoot?: boolean;
   contactEmail?: string | null;

@@ -25,12 +25,16 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function updateSettings(app: AppContext, update: SettingsUpdate): SettingsDto {
   if (update.libraryRoot !== undefined) {
     if (app.config.envLibraryRoot) throw new ValidationError("Library root is set by BOOKSHELF_LIBRARY_ROOT");
-    const root = update.createLibraryRoot
-      ? createLibraryRoot(update.libraryRoot, app.config.dataDir)
-      : validateLibraryRoot(update.libraryRoot, app.config.dataDir);
+    let root: string | null = null; // null unlinks the library only: files and directories stay as they are
+    if (update.libraryRoot !== null) {
+      root = update.createLibraryRoot
+        ? createLibraryRoot(update.libraryRoot, app.config.dataDir)
+        : validateLibraryRoot(update.libraryRoot, app.config.dataDir);
+    }
     const changed = root !== app.settings.get("libraryRoot");
     app.settings.set("libraryRoot", root);
     // Re-index in the background; clients follow progress via library.status events.
+    // With no root, open() only stops watching and clears the in-memory index.
     if (changed) app.library.open(root).catch((err) => console.error("Library scan failed:", err));
   }
   if (update.contactEmail !== undefined) {

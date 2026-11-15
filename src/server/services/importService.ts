@@ -159,7 +159,7 @@ export class ImportService {
     hashCache.put(abs, st.size, st.mtimeMs, hash);
     const file: FileToLink = { abs, rel, size: st.size, mtimeMs: Math.trunc(st.mtimeMs), ino: st.ino, detected: detectFormat(filename)!, hash };
     library.linker.register(file, hash, bookId);
-    library.retention.fileAdded(bookId);
+    library.fileAdded(bookId);
     return { status, bookId, file, preferred };
   }
 

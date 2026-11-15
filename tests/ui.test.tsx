@@ -213,6 +213,7 @@ describe("UI render smoke", () => {
   test("settings", () => {
     const html = render("/settings", baseQuery, page);
     expect(html).toContain("Library root");
+    expect(html).toContain("Remove library");
     expect(html).toContain("Books on disk");
     expect(html).toContain("3.3 MB"); // cover images
     expect(html).toContain("Gone Book");

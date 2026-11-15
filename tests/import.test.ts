@@ -107,6 +107,17 @@ describe("import", () => {
     expect(byId).toMatchObject({ status: "reconnected", bookId: first.bookId, shelf: "Fiction" });
   });
 
+  test("the empty-library warning clears after an upload", async () => {
+    const first = await upload(await epub("Dune", ["Frank Herbert"]), "a.epub", "Fiction");
+    rmSync(join(root, first.relPath!));
+    await app.library.close();
+    await app.library.open(root);
+    expect(app.library.status().message).toMatch(/mounted/);
+
+    await upload(await epub("Emma", ["Jane Austen"]), "b.epub", "Fiction");
+    expect(app.library.status().message).toBeNull();
+  });
+
   test("name collisions get a counter", async () => {
     const a = await upload(await epub("Same Title", ["Same Author"], undefined, false), "1.epub", "Fiction");
     const b = await upload(await epubVariant(), "2.epub", "Fiction");

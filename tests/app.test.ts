@@ -78,6 +78,20 @@ describe("settings", () => {
     const app = makeApp({ BOOKSHELF_LIBRARY_ROOT: lib });
     expect(getSettings(app)).toMatchObject({ libraryRoot: lib, libraryRootFromEnv: true });
     expect(() => updateSettings(app, { libraryRoot: lib })).toThrow(ValidationError);
+    expect(() => updateSettings(app, { libraryRoot: null })).toThrow(ValidationError);
+  });
+
+  test("removing the library root unlinks it without touching the disk", async () => {
+    const app = makeApp();
+    const lib = join(tmp, "removable");
+    mkdirSync(join(lib, "Shelf"), { recursive: true });
+    writeFileSync(join(lib, "Shelf", "book.epub"), "x");
+    updateSettings(app, { libraryRoot: lib });
+    expect(updateSettings(app, { libraryRoot: null }).libraryRoot).toBeNull();
+    expect(app.settings.get("libraryRoot")).toBeNull();
+    await app.library.whenReady();
+    expect(app.library.status()).toMatchObject({ state: "no-root", root: null, fileCount: 0, watching: false });
+    expect(existsSync(join(lib, "Shelf", "book.epub"))).toBe(true);
   });
 
   test("contact email", () => {

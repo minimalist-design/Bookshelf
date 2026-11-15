@@ -61,6 +61,8 @@ export class Library {
   private root: string | null = null;
   private state: LibraryState = "no-root";
   private message: string | null = null;
+  /** The last full scan found no files while metadata exists (see Retention.reconcile). */
+  private emptyGuard = false;
   private scanProgress: { done: number; total: number } | null = null;
   private generation = 0;
   private watcher: FSWatcher | null = null;
@@ -171,6 +173,7 @@ export class Library {
 
     this.state = "scanning";
     this.message = null;
+    this.emptyGuard = false;
     const found: WalkedFile[] = [];
     for await (const f of walkBooks(root)) {
       if (gen !== this.generation) return;
@@ -204,12 +207,26 @@ export class Library {
     }
     this.deps.hashCache.prune(new Set(found.map((f) => f.abs)));
     const { skipped } = this.retention.reconcile(found.length);
-    if (skipped) this.message = "Library appears empty; kept all metadata (is the drive mounted?)";
+    if (skipped) {
+      this.emptyGuard = true;
+      this.message = "Library appears empty; kept all metadata (is the drive mounted?)";
+    }
 
     this.state = "ready";
     this.scanProgress = null;
     this.emitStatus(true);
     this.deps.events.libraryChanged([]);
+  }
+
+  /** A file of `bookId` was indexed (watcher or import). */
+  fileAdded(bookId: number): void {
+    this.retention.fileAdded(bookId);
+    if (!this.emptyGuard) return;
+    // The library is evidently there after all: drop the warning and reconcile properly.
+    this.emptyGuard = false;
+    this.message = null;
+    this.emitStatus(true);
+    void this.rescan();
   }
 
   // ---- watcher --------------------------------------------------------------
@@ -334,7 +351,7 @@ export class Library {
         this.index.remove(f.rel);
         return null;
       }
-      this.retention.fileAdded(result.file.bookId);
+      this.fileAdded(result.file.bookId);
       if (previous && previous.bookId !== result.file.bookId) this.retention.fileRemoved(previous.bookId);
       this.deps.events.libraryChanged(previous ? [previous.bookId, result.file.bookId] : [result.file.bookId]);
       this.emitStatus();

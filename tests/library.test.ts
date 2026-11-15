@@ -187,6 +187,22 @@ describe("retention on startup", () => {
     expect(app.library.status().state).toBe("unavailable");
     expect(app.books.exists(id)).toBe(true);
   });
+
+  test("the empty-library warning clears once a book is added", async () => {
+    put("A/Book -- Someone.epub");
+    let app = newApp();
+    await app.library.open(root);
+    await app.library.close();
+
+    rmSync(join(root, "A"), { recursive: true });
+    app = newApp();
+    await app.library.open(root);
+    expect(app.library.status().message).toMatch(/mounted/);
+
+    put("B/New Book -- Author.epub");
+    await waitFor(() => titles(app).includes("New Book"));
+    expect(app.library.status().message).toBeNull();
+  });
 });
 
 describe("watcher", () => {
