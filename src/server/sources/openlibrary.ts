@@ -1,5 +1,5 @@
 import { formatEdition } from "../../shared/edition.ts";
-import type { CandidateMetadata, MetadataCandidate } from "../../shared/types.ts";
+import type { CandidateMetadata, CoverOption, MetadataCandidate } from "../../shared/types.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import type { HttpClient } from "./http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate, parseSeries } from "./normalize.ts";
@@ -44,6 +44,23 @@ interface OlSearchDoc {
   subject?: string[];
   language?: string[];
 }
+
+interface OlEditionEntry {
+  key: string;
+  title?: string;
+  subtitle?: string;
+  publishers?: string[];
+  publish_date?: string;
+  number_of_pages?: number;
+  edition_name?: string;
+  physical_format?: string;
+  covers?: number[];
+  isbn_13?: string[];
+  isbn_10?: string[];
+  languages?: { key: string }[];
+}
+
+export const olCoverUrl = (id: number, size: "S" | "M" | "L" = "L") => `${COVERS}/b/id/${id}-${size}.jpg`;
 
 const text = (v: string | { value?: string } | undefined | null): string | null => {
   const s = typeof v === "string" ? v : v?.value;
@@ -98,7 +115,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
       m.seriesIndex = series.seriesIndex;
       m.description = cleanDescription(text(ed.description));
       workKey = ed.works?.[0]?.key?.replace("/works/", "") ?? null;
-      if (!coverUrl && ed.covers?.[0] && ed.covers[0] > 0) coverUrl = `${COVERS}/b/id/${ed.covers[0]}-L.jpg`;
+      if (!coverUrl && ed.covers?.[0] && ed.covers[0] > 0) coverUrl = olCoverUrl(ed.covers[0]);
     }
   }
   if (workKey && (!m.description || !m.tags.length)) {
@@ -157,9 +174,48 @@ export async function openLibrarySearch(
         url: `${OL}${d.key}`,
         label: label([m.authors[0], d.first_publish_year ? `first published ${d.first_publish_year}` : null]),
         metadata: m,
-        coverUrl: d.cover_i && d.cover_i > 0 ? `${COVERS}/b/id/${d.cover_i}-L.jpg` : null,
+        coverUrl: d.cover_i && d.cover_i > 0 ? olCoverUrl(d.cover_i) : null,
         olEditionKey: d.cover_edition_key ?? null,
         olWorkKey: workKey,
       };
     });
+}
+
+/**
+ * Every cover of every edition of a work (editions often have their own cover). Edition records
+ * only link to author keys, so the work's author names are passed in.
+ */
+export async function openLibraryEditionCovers(http: HttpClient, workKey: string, authors: string[]): Promise<CoverOption[]> {
+  // One request: the endpoint accepts a large limit (popular works have a few hundred editions).
+  const res = await http.getJson<{ entries?: OlEditionEntry[] }>(`${OL}/works/${encodeURIComponent(workKey)}/editions.json?limit=1000`);
+  const out: CoverOption[] = [];
+  for (const e of res?.entries ?? []) {
+    const ids = (e.covers ?? []).filter((id) => id > 0);
+    if (!ids.length || !e.title) continue;
+    const isbn13 = normalizeIsbn(e.isbn_13?.[0]) ?? normalizeIsbn(e.isbn_10?.[0]);
+    const edition = e.edition_name?.replace(/\s+/g, " ").trim() || null;
+    const details = [
+      e.publishers?.[0]?.trim(),
+      edition ? formatEdition(edition) : null,
+      parseLooseDate(e.publish_date)?.slice(0, 4),
+      e.number_of_pages && e.number_of_pages > 0 ? `${e.number_of_pages} pages` : null,
+      e.physical_format?.trim(),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    for (const id of ids) {
+      out.push({
+        coverUrl: olCoverUrl(id),
+        url: `${OL}${e.key}`,
+        title: e.title.trim(),
+        subtitle: e.subtitle?.trim() || null,
+        authors,
+        details,
+        language: normalizeLanguage(e.languages?.[0]?.key),
+        isbn13,
+        thisEdition: false,
+      });
+    }
+  }
+  return out;
 }

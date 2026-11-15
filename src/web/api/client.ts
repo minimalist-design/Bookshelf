@@ -5,6 +5,7 @@ import type {
   PagesDto,
   ReadingPosition,
   ApplyMetadataRequest,
+  CoverSearchResult,
   LookupQueueStatus,
   LookupResult,
   LookupSource,
@@ -95,6 +96,9 @@ export const api = {
   deleteFile: (bookId: number, hash: string) => request<DeleteResult>(`/api/books/${bookId}/files/${hash}`, { method: "DELETE" }),
   lookup: (id: number, opts: { source?: LookupSource; q?: string } = {}) =>
     request<LookupResult>(`/api/lookup/${id}${qs({ source: opts.source, q: opts.q || undefined })}`),
+  coverCandidates: (id: number, q?: string) => request<CoverSearchResult>(`/api/lookup/${id}/covers${qs({ q: q || undefined })}`),
+  setCoverFromUrl: (id: number, url: string) =>
+    request<BookDetailDto>(`/api/books/${id}/cover/from-url`, { method: "POST", body: JSON.stringify({ url }) }),
   applyMetadata: (id: number, req: ApplyMetadataRequest) =>
     request<BookActionResult>(`/api/books/${id}/apply-metadata`, { method: "POST", body: JSON.stringify(req) }),
   enqueueLookups: (ids: number[]) => request<LookupQueueStatus>("/api/lookup/bulk", { method: "POST", body: JSON.stringify({ ids }) }),

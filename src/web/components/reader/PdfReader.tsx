@@ -2,14 +2,12 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { ActionIcon, Box, Center, Group, Loader, NumberInput, Text, Tooltip } from "@mantine/core";
 import { useElementSize } from "@mantine/hooks";
 import { IconArrowsHorizontal, IconExternalLink, IconZoomIn, IconZoomOut } from "@tabler/icons-react";
-import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/types/src/display/api";
 import type { BookDetailDto } from "../../../shared/types.ts";
 import { downloadUrl, fileUrl } from "./fileUrls.ts";
+import { openPdf } from "./pdf.ts";
 import { ReaderFrame } from "./ReaderFrame.tsx";
 import { usePositionSaver } from "./usePositionSaver.ts";
-
-pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/build/pdf.worker.min.mjs";
 
 interface Props {
   book: BookDetailDto;
@@ -34,14 +32,7 @@ export function PdfReader({ book, hash, onBack }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    const task = pdfjs.getDocument({
-      url: fileUrl(book.id, hash),
-      cMapUrl: "/vendor/pdfjs/cmaps/",
-      cMapPacked: true,
-      standardFontDataUrl: "/vendor/pdfjs/standard_fonts/",
-      disableAutoFetch: true, // only fetch byte ranges for pages actually shown
-      rangeChunkSize: 256 * 1024,
-    });
+    const task = openPdf(book.id, hash);
     task.promise
       .then(async (d) => {
         const first = await d.getPage(1);

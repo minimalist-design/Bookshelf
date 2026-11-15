@@ -10,11 +10,13 @@ import { normalizeIsbn } from "../naming/isbn.ts";
 import { diffMetadata } from "../sources/diff.ts";
 import { lookupDoi, searchCrossref } from "../sources/doi.ts";
 import type { HttpClient } from "../sources/http.ts";
-import { openLibraryByIsbn, openLibrarySearch } from "../sources/openlibrary.ts";
+import { openLibraryByIsbn, openLibraryEditionCovers, openLibrarySearch } from "../sources/openlibrary.ts";
 import type {
   ApplyMetadataRequest,
   BookActionResult,
   BookUpdate,
+  CoverOption,
+  CoverSearchResult,
   LookupQueueStatus,
   LookupResult,
   LookupSource,
@@ -44,6 +46,26 @@ export interface LookupOptions {
 }
 
 const COVER_HOSTS = new Set(["covers.openlibrary.org"]);
+/** Works whose editions are listed in the cover picker (one request each, throttled to 1/s). */
+const MAX_EXPANDED_WORKS = 3;
+
+/** Title for matching search results to the book: case, punctuation and subtitle ignored. */
+const titleKey = (t: string) => t.toLowerCase().split(":")[0]!.replace(/[^\p{L}\p{N}]+/gu, "");
+
+function candidateCover(c: MetadataCandidate): CoverOption {
+  const m = c.metadata;
+  return {
+    coverUrl: c.coverUrl!,
+    url: c.url,
+    title: m.title ?? "",
+    subtitle: m.subtitle,
+    authors: m.authors,
+    details: c.label.replace(/^Open Library( · )?/, ""),
+    language: m.language,
+    isbn13: m.isbn13,
+    thisEdition: false,
+  };
+}
 
 /**
  * Finds metadata candidates in Open Library (ISBN, title/author) and the DOI registries
@@ -125,13 +147,7 @@ export class LookupService {
     if (patch.series === undefined && patch.seriesIndex !== undefined && !this.deps.books.get(bookId)?.series) delete patch.seriesIndex;
 
     // Fetch the cover before touching anything, so a failed download doesn't half-apply.
-    let cover: Uint8Array | null = null;
-    if (req.cover && c.coverUrl) {
-      const url = new URL(c.coverUrl);
-      if (url.protocol !== "https:" || !COVER_HOSTS.has(url.host)) throw new ValidationError("Cover URL not allowed");
-      url.searchParams.set("default", "false");
-      cover = await this.deps.http.getBytes(url.toString());
-    }
+    const cover = req.cover && c.coverUrl ? await this.downloadCover(c.coverUrl) : null;
 
     const result = await this.deps.bookService.update(bookId, patch, {
       confirm: c.source,
@@ -145,6 +161,90 @@ export class LookupService {
     this.removeFromQueue(bookId);
     this.deps.events.libraryChanged([bookId]);
     return result;
+  }
+
+  /** Only Open Library covers are fetched; `default=false` makes a missing image a 404 instead of a blank. */
+  private async downloadCover(coverUrl: string): Promise<Uint8Array | null> {
+    let url: URL;
+    try {
+      url = new URL(coverUrl);
+    } catch {
+      throw new ValidationError("Cover URL not allowed");
+    }
+    if (url.protocol !== "https:" || !COVER_HOSTS.has(url.host)) throw new ValidationError("Cover URL not allowed");
+    url.searchParams.set("default", "false");
+    return this.deps.http.getBytes(url.toString());
+  }
+
+  // ---- covers ------------------------------------------------------------------------
+
+  /**
+   * Every Open Library cover that could belong to the book: its own ISBN edition first, then the
+   * covers of all editions of the matching work(s) (book's language first), then other search
+   * results. A typed ISBN starts from that edition; other text replaces the title/author search.
+   */
+  async findCovers(bookId: number, q?: string): Promise<CoverSearchResult> {
+    const book = this.requireVisible(bookId);
+    const { http } = this.deps;
+    const errors: string[] = [];
+    const attempt = async <T>(label: string, fn: () => Promise<T>): Promise<T | null> => {
+      try {
+        return await fn();
+      } catch (err) {
+        errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    };
+
+    const text = q?.trim();
+    const isbn = text ? normalizeIsbn(text) : book.isbn13;
+    const own = isbn ? await attempt("Open Library", () => openLibraryByIsbn(http, isbn)) : null;
+    const works =
+      !text || !isbn
+        ? ((await attempt("Open Library search", () =>
+            openLibrarySearch(http, text ? { q: text } : { title: book.title, author: book.authors[0] ?? null }, 10),
+          )) ?? [])
+        : [];
+
+    // Expand the edition's work and the search results that are the same title (not sequels etc.).
+    const target = titleKey(own?.metadata.title ?? (text ? works[0]?.metadata.title : book.title) ?? "");
+    let same = works.filter((w) => titleKey(w.metadata.title ?? "") === target);
+    if (!own && !same.length && works[0]) same = [works[0]];
+    const expand = new Map<string, string[]>();
+    if (own?.olWorkKey) expand.set(own.olWorkKey, own.metadata.authors);
+    for (const w of same) if (w.olWorkKey && !expand.has(w.olWorkKey)) expand.set(w.olWorkKey, w.metadata.authors);
+
+    const editions: CoverOption[] = [];
+    for (const [workKey, authors] of [...expand].slice(0, MAX_EXPANDED_WORKS)) {
+      editions.push(...((await attempt("Open Library editions", () => openLibraryEditionCovers(http, workKey, authors))) ?? []));
+    }
+    const lang = book.language;
+    if (lang) editions.sort((a, b) => Number(b.language === lang) - Number(a.language === lang)); // stable
+
+    const options: CoverOption[] = [];
+    if (own?.coverUrl) options.push(candidateCover(own));
+    options.push(...editions);
+    for (const w of works) if (w.coverUrl && !(w.olWorkKey && expand.has(w.olWorkKey) && editions.length)) options.push(candidateCover(w));
+
+    const seen = new Set<string>();
+    const unique = options
+      .map((o) => ({ ...o, thisEdition: !!book.isbn13 && o.isbn13 === book.isbn13 }))
+      .filter((o) => !seen.has(o.coverUrl) && seen.add(o.coverUrl));
+    // The book's own edition(s) first.
+    unique.sort((a, b) => Number(b.thisEdition) - Number(a.thisEdition));
+    return { bookId, options: unique, errors };
+  }
+
+  /** Download a cover picked from a lookup result and make it the book's cover (like an upload). */
+  async setCoverFromUrl(bookId: number, coverUrl: unknown): Promise<void> {
+    this.requireVisible(bookId);
+    if (typeof coverUrl !== "string" || !coverUrl) throw new ValidationError("Missing cover URL");
+    const data = await this.downloadCover(coverUrl);
+    if (!data) throw new ValidationError("Open Library has no image for this cover");
+    if (!(await this.deps.covers.save(bookId, { data, mime: "image/jpeg" }))) throw new ValidationError("The image could not be read");
+    this.deps.books.setHasCover(bookId, true, "openlibrary");
+    this.deps.books.confirm(bookId, "manual");
+    this.deps.events.libraryChanged([bookId]);
   }
 
   // ---- review queue ------------------------------------------------------------------

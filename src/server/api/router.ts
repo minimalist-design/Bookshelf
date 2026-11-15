@@ -6,7 +6,7 @@ import { handle, json, readJson } from "./http.ts";
 import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
 import { CONTENT_TYPES, contentDisposition, serveFile } from "./files.ts";
-import { PDFJS_KINDS, pdfjsAssetPath } from "./pdfjsAssets.ts";
+import { pdfjsAssetPath } from "./pdfjsAssets.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
@@ -165,6 +165,18 @@ export function apiRoutes(app: AppContext) {
         return json(await app.lookup.lookup(Number(req.params.id), { source: (source as LookupSource) || undefined, q: p.get("q") || undefined }));
       }),
     },
+    "/api/lookup/:id/covers": {
+      GET: handle(async (req: Bun.BunRequest<"/api/lookup/:id/covers">) =>
+        json(await app.lookup.findCovers(Number(req.params.id), new URL(req.url).searchParams.get("q") || undefined)),
+      ),
+    },
+    "/api/books/:id/cover/from-url": {
+      POST: handle(async (req: Bun.BunRequest<"/api/books/:id/cover/from-url">) => {
+        const { url } = await readJson<{ url: unknown }>(req);
+        await app.lookup.setCoverFromUrl(Number(req.params.id), url);
+        return json(bookDetail(app, Number(req.params.id)));
+      }),
+    },
     "/api/books/:id/apply-metadata": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/apply-metadata">) =>
         json(await app.lookup.apply(Number(req.params.id), await readJson<ApplyMetadataRequest>(req))),
@@ -204,10 +216,12 @@ function bookFile(app: AppContext, req: Bun.BunRequest<"/api/books/:id/files/:ha
   });
 }
 
-/** pdf.js worker, CMaps and standard fonts for the browser PDF reader (fixed directories, plain names only). */
+/** pdf.js worker, CMaps, fonts, image decoders and ICC profiles for the browser PDF reader (allow-listed names only). */
 function pdfjsAsset(req: Bun.BunRequest<"/vendor/pdfjs/:kind/:name">): Response {
   const { kind, name } = req.params;
   const path = pdfjsAssetPath(kind, name);
   if (!path) return json({ error: "Not found" }, { status: 404 });
-  return serveFile(req, path, { contentType: PDFJS_KINDS[kind]!.type, etag: `pdfjs-${name}`, cacheControl: "public, max-age=86400" });
+  // application/wasm is required for WebAssembly.instantiateStreaming.
+  const contentType = /\.m?js$/.test(name) ? "text/javascript" : name.endsWith(".wasm") ? "application/wasm" : "application/octet-stream";
+  return serveFile(req, path, { contentType, etag: `pdfjs-${name}`, cacheControl: "public, max-age=86400" });
 }

@@ -164,13 +164,25 @@ describe("reading position", () => {
 });
 
 describe("pdf.js assets", () => {
-  test("worker, cmaps and fonts are served; nothing else", async () => {
+  test("worker, cmaps, fonts, image decoders and ICC profiles are served; nothing else", async () => {
     const worker = await fetch(url("/vendor/pdfjs/build/pdf.worker.min.mjs"));
     expect(worker.status).toBe(200);
     expect(worker.headers.get("content-type")).toBe("text/javascript");
     await worker.arrayBuffer();
     expect((await fetch(url("/vendor/pdfjs/cmaps/78-H.bcmap"))).status).toBe(200);
     expect((await fetch(url("/vendor/pdfjs/standard_fonts/FoxitFixed.pfb"))).status).toBe(200);
+    const wasm = await fetch(url("/vendor/pdfjs/wasm/jbig2.wasm"));
+    expect(wasm.status).toBe(200);
+    expect(wasm.headers.get("content-type")).toBe("application/wasm");
+    await wasm.arrayBuffer();
+    const fallback = await fetch(url("/vendor/pdfjs/wasm/openjpeg_nowasm_fallback.js"));
+    expect(fallback.status).toBe(200);
+    expect(fallback.headers.get("content-type")).toBe("text/javascript");
+    await fallback.arrayBuffer();
+    expect((await fetch(url("/vendor/pdfjs/iccs/CGATS001Compat-v2-micro.icc"))).status).toBe(200);
+    expect((await fetch(url("/vendor/pdfjs/wasm/LICENSE_JBIG2"))).status).toBe(404);
+    expect((await fetch(url("/vendor/pdfjs/wasm/quickjs-eval.wasm"))).status).toBe(404);
+    expect((await fetch(url("/vendor/pdfjs/standard_fonts/LICENSE_FOXIT"))).status).toBe(404);
     expect((await fetch(url("/vendor/pdfjs/build/pdf.mjs"))).status).toBe(404);
     expect((await fetch(url("/vendor/pdfjs/cmaps/..%2F..%2Fpackage.json"))).status).toBe(404);
     expect((await fetch(url("/vendor/pdfjs/other/x"))).status).toBe(404);

@@ -1,5 +1,5 @@
 import { Button, Center, Loader, Stack, Text } from "@mantine/core";
-import { useNavigate, useParams } from "react-router";
+import { useLocation, useNavigate, useParams } from "react-router";
 import { useBook } from "../api/hooks.ts";
 import { EpubReader } from "../components/reader/EpubReader.tsx";
 import { downloadUrl } from "../components/reader/fileUrls.ts";
@@ -12,7 +12,9 @@ export default function Reader() {
   const bookId = Number(id);
   const book = useBook(Number.isFinite(bookId) ? bookId : null);
   const navigate = useNavigate();
-  const back = () => navigate(`/books/${bookId}`);
+  // Pass the return state back so the book page still knows which shelf it was opened from.
+  const state = useLocation().state;
+  const back = () => navigate(`/books/${bookId}`, { state });
 
   if (book.isLoading) {
     return (

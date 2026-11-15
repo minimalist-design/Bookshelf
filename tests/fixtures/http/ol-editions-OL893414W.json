@@ -1,0 +1,200 @@
+{
+ "links": {
+  "self": "/works/OL893414W/editions.json?limit=1000",
+  "work": "/works/OL893414W"
+ },
+ "size": 8,
+ "entries": [
+  {
+   "key": "/books/OL62445412M",
+   "title": "Dune",
+   "publishers": [
+    "Nemira Publishing House"
+   ],
+   "publish_date": "2021",
+   "number_of_pages": 734,
+   "edition_name": "Ediția a VII-a",
+   "physical_format": "Paperback",
+   "covers": [
+    15246488
+   ],
+   "isbn_13": [
+    "9786064312617"
+   ],
+   "languages": [
+    {
+     "key": "/languages/rum"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL58201616M",
+   "title": "Ḥolit",
+   "publishers": [
+    "ʻAm-ʻoved"
+   ],
+   "publish_date": "1989",
+   "languages": [
+    {
+     "key": "/languages/heb"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL39551956M",
+   "title": "Dune",
+   "subtitle": "The Breath-Taking and Academy Award-nominated Science Fiction Masterpiece",
+   "publishers": [
+    "Orion Publishing Group, Limited"
+   ],
+   "publish_date": "2022",
+   "covers": [
+    15270053
+   ],
+   "isbn_13": [
+    "9781399611176"
+   ],
+   "languages": [
+    {
+     "key": "/languages/eng"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL1M",
+   "title": "Dune",
+   "covers": [
+    -1
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL57671241M",
+   "title": "Dune - Collector",
+   "publishers": [
+    "Pocket",
+    "POCKET"
+   ],
+   "publish_date": "Oct 01, 2020",
+   "number_of_pages": 895,
+   "physical_format": "pocket book",
+   "covers": [
+    14841443
+   ],
+   "isbn_13": [
+    "9782266307307"
+   ],
+   "isbn_10": [
+    "2266307304"
+   ],
+   "languages": [
+    {
+     "key": "/languages/fre"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL22597282M",
+   "title": "Dune",
+   "publishers": [
+    "Ace Books"
+   ],
+   "publish_date": "1987",
+   "number_of_pages": 535,
+   "edition_name": "Ace ed.",
+   "covers": [
+    15166231
+   ],
+   "isbn_10": [
+    "0441172660",
+    "0441172717"
+   ],
+   "languages": [
+    {
+     "key": "/languages/eng"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL32848840M",
+   "title": "Dune",
+   "publishers": [
+    "Hodder",
+    "Hodder Paperback"
+   ],
+   "publish_date": "Jul 22, 2006",
+   "number_of_pages": 604,
+   "physical_format": "paperback",
+   "covers": [
+    11481354
+   ],
+   "isbn_13": [
+    "9781444738209"
+   ],
+   "isbn_10": [
+    "1444738208"
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  },
+  {
+   "key": "/books/OL59726263M",
+   "title": "Dune",
+   "publishers": [
+    "Ace"
+   ],
+   "publish_date": "2020",
+   "number_of_pages": 896,
+   "edition_name": "91st printing",
+   "physical_format": "Mass Market Paperback",
+   "covers": [
+    15110282
+   ],
+   "isbn_13": [
+    "9780441172719"
+   ],
+   "languages": [
+    {
+     "key": "/languages/eng"
+    }
+   ],
+   "works": [
+    {
+     "key": "/works/OL893414W"
+    }
+   ]
+  }
+ ]
+}

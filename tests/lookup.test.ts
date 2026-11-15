@@ -30,6 +30,7 @@ async function fakeNetwork(overrides: Record<string, () => Response> = {}) {
     [/openlibrary\.org\/api\/books\?bibkeys=ISBN:9780441172719/, () => Response.json(JSON.parse(fixture("ol-books-data-9780441172719.json")))],
     [/openlibrary\.org\/api\/books\?/, () => Response.json({})],
     [/openlibrary\.org\/books\/OL59726263M\.json/, () => Response.json(JSON.parse(fixture("ol-edition-OL59726263M.json")))],
+    [/openlibrary\.org\/works\/OL893414W\/editions\.json/, () => Response.json(JSON.parse(fixture("ol-editions-OL893414W.json")))],
     [/openlibrary\.org\/works\/OL893414W\.json/, () => Response.json(JSON.parse(fixture("ol-work-dune.json")))],
     [/openlibrary\.org\/search\.json/, () => Response.json(JSON.parse(fixture("ol-search-dune.json")))],
     [/covers\.openlibrary\.org\/b\/id\/15110282-L\.jpg/, () => new Response(new Blob([jpeg as BlobPart]), { headers: { "content-type": "image/jpeg" } })],
@@ -230,6 +231,50 @@ describe("lookup service", () => {
     expect(r.renamed[0]!.to).toBe("S/Ashish Vaswani et al. - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
   });
 
+  test("cover picker: own edition, then every edition of the same work (book's language first), then other works", async () => {
+    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    await app.library.open(root);
+    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    await app.bookService.update(id, { language: "en" });
+
+    const r = await app.lookup.findCovers(id);
+    expect(r.errors).toEqual([]);
+    const ids = r.options.map((o) => /\/b\/id\/(\d+)-L/.exec(o.coverUrl)![1]);
+    expect(ids).toEqual([
+      "15110282", // this edition (ISBN), listed once although it is also among the editions
+      "15270053", "15166231", // English editions
+      "15246488", "14841443", "11481354", // other languages / unknown, in Open Library's order; no-cover and -1 entries skipped
+      "980253", "6976407", // other works from the search (sequels): work-level cover only
+    ]);
+    expect(r.options[0]).toMatchObject({ thisEdition: true, title: "Dune", authors: ["Frank Herbert"], isbn13: "9780441172719" });
+    expect(r.options.filter((o) => o.thisEdition)).toHaveLength(1);
+    expect(r.options[2]).toMatchObject({ url: "https://openlibrary.org/books/OL22597282M", details: "Ace Books · Ace ed. · 1987 · 535 pages", language: "en", authors: ["Frank Herbert"] });
+    expect(r.options[3]!.details).toContain("Paperback");
+    expect(r.options[3]!.language).toBe("ro");
+    expect(calls.filter((x) => x.url.includes("/editions.json")).length).toBe(1); // the work is fetched once
+
+    // A typed ISBN starts from that edition: no title search, but still all editions of its work.
+    calls.length = 0;
+    const typed = await app.lookup.findCovers(id, "978-0-441-17271-9");
+    expect(typed.options.length).toBe(6);
+    expect(calls.some((x) => x.url.includes("search.json"))).toBe(false);
+
+    // Free text replaces the search; the first result's title picks the work to expand.
+    const searched = await app.lookup.findCovers(id, "dune herbert");
+    expect(searched.options.length).toBe(8);
+    expect(searched.options.some((o) => o.thisEdition)).toBe(true); // marked by ISBN among the editions
+
+    await expect(app.lookup.setCoverFromUrl(id, "https://evil.example/x.jpg")).rejects.toThrow(ValidationError);
+    await expect(app.lookup.setCoverFromUrl(id, 42)).rejects.toThrow(ValidationError);
+
+    const before = app.books.get(id)!.updatedAt;
+    await Bun.sleep(5);
+    await app.lookup.setCoverFromUrl(id, r.options[0]!.coverUrl);
+    const after = app.books.get(id)!;
+    expect(after.updatedAt).not.toBe(before); // the UI's cover cache-buster
+    expect(after).toMatchObject({ hasCover: true, coverSource: "openlibrary", confirmedSource: "manual", publisher: null, pages: null });
+  });
+
   test("bulk lookup fills the review queue; accept-fills only applies identifier matches", async () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     put("S/Mystery -- Nobody.epub");
@@ -295,6 +340,17 @@ describe("lookup service", () => {
       });
       expect(applied.status).toBe(200);
       expect((await applied.json()).book.pages).toBe(896);
+      const covers = await (await fetch(`${server.url}api/lookup/${id}/covers?q=Dune`)).json();
+      expect(covers.options.length).toBe(8);
+      const setCover = await fetch(`${server.url}api/books/${id}/cover/from-url`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: candidates[0].coverUrl }),
+      });
+      expect(setCover.status).toBe(200);
+      expect((await setCover.json()).hasCover).toBe(true);
+      const bad = await fetch(`${server.url}api/books/${id}/cover/from-url`, { method: "POST", body: JSON.stringify({ url: "http://covers.openlibrary.org/x.jpg" }) });
+      expect(bad.status).toBe(400);
       expect((await fetch(`${server.url}api/lookup/bulk`, { method: "POST", body: JSON.stringify({ ids: [id] }) })).status).toBe(202);
       await app.lookup.idle();
       expect(((await (await fetch(`${server.url}api/review-queue`)).json()) as unknown[]).length).toBe(1);

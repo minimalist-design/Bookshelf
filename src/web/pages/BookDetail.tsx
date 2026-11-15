@@ -6,7 +6,6 @@ import {
   Badge,
   Button,
   Center,
-  FileButton,
   Grid,
   Group,
   Loader,
@@ -20,23 +19,27 @@ import {
   Title,
   Tooltip,
 } from "@mantine/core";
+import { useFileDialog } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import {
   IconArrowLeft,
   IconCloudSearch,
   IconBook,
+  IconChevronDown,
   IconDownload,
   IconDots,
   IconEdit,
+  IconFileTypePdf,
   IconFileTypography,
   IconGitMerge,
   IconPhotoUp,
   IconPhotoX,
   IconTrash,
   IconUnlink,
+  IconUpload,
 } from "@tabler/icons-react";
 import { useMutation } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { formatEdition } from "../../shared/edition.ts";
 import type { BookDetailDto, BookFileDto } from "../../shared/types.ts";
 import { api } from "../api/client.ts";
@@ -46,10 +49,13 @@ import { MergeModal } from "../components/book/MergeModal.tsx";
 import { LookupModal } from "../components/lookup/LookupModal.tsx";
 import { downloadUrl, isReadable, READABLE, readerUrl } from "../components/reader/fileUrls.ts";
 import { CoverThumb } from "../components/CoverThumb.tsx";
+import { CoverPickerModal } from "../components/book/CoverPickerModal.tsx";
+import { PdfPagePickerModal } from "../components/book/PdfPagePickerModal.tsx";
 import { DeleteBooksModal } from "../components/book/DeleteBooksModal.tsx";
 import { ConfirmedMark } from "../components/library/BookCards.tsx";
 import { MoveToSubmenu } from "../components/library/MoveToMenu.tsx";
 import { useBookActions } from "../components/library/useBookActions.ts";
+import { returnUrl } from "../components/library/returnTo.ts";
 
 const CONFIRMED_LABEL = { openlibrary: "Confirmed · Open Library", doi: "Confirmed · DOI", manual: "Confirmed · edited" } as const;
 const SOURCE_LABEL = { embedded: "From the file's metadata", filename: "From the filename", mixed: "From file metadata and filename" } as const;
@@ -63,7 +69,6 @@ function formatSize(bytes: number): string {
 export function BookDetail() {
   const id = Number(useParams().id);
   const book = useBook(Number.isFinite(id) ? id : null);
-  const navigate = useNavigate();
 
   if (book.isLoading) {
     return (
@@ -78,7 +83,7 @@ export function BookDetail() {
         <Alert color="yellow" title="Book not found">
           It may have been removed from the library directory.
         </Alert>
-        <Button variant="default" leftSection={<IconArrowLeft size={16} />} onClick={() => navigate(-1)}>
+        <Button variant="default" component={Link} to="/" leftSection={<IconArrowLeft size={16} />}>
           Back
         </Button>
       </Stack>
@@ -89,10 +94,15 @@ export function BookDetail() {
 
 function BookView({ book }: { book: BookDetailDto }) {
   const navigate = useNavigate();
+  // Router state set by the library link that opened this book; carried through the reader.
+  const returnState = useLocation().state;
   const invalidate = useInvalidateBooks();
   const [editing, setEditing] = useState(false);
   const [merging, setMerging] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
+  const [pickingCover, setPickingCover] = useState(false);
+  const [pickingPage, setPickingPage] = useState(false);
+  const hasPdf = book.files.some((f) => f.format === "pdf");
   const onError = (e: Error) => notifications.show({ color: "red", message: e.message });
   // undefined = closed, null = whole book, string = one file (hash)
   const [deleting, setDeleting] = useState<string | null | undefined>(undefined);
@@ -125,6 +135,12 @@ function BookView({ book }: { book: BookDetailDto }) {
   });
   const setCover = useMutation({ mutationFn: (f: File) => api.setCover(book.id, f), onSuccess: invalidate, onError });
   const removeCover = useMutation({ mutationFn: () => api.removeCover(book.id), onSuccess: invalidate, onError });
+  const coverFile = useFileDialog({
+    multiple: false,
+    accept: "image/*",
+    resetOnOpen: true,
+    onChange: (files) => files?.[0] && setCover.mutate(files[0]),
+  });
   const detach = useMutation({
     mutationFn: (f: BookFileDto) => api.detachFile(book.id, f.hash),
     onSuccess: (r) => {
@@ -172,12 +188,12 @@ function BookView({ book }: { book: BookDetailDto }) {
   return (
     <Stack maw={1100}>
       <Group justify="space-between">
-        <Button variant="subtle" leftSection={<IconArrowLeft size={16} />} onClick={() => navigate(-1)} px={4}>
+        <Button variant="subtle" component={Link} to={returnUrl(returnState)} leftSection={<IconArrowLeft size={16} />} px={4}>
           Back
         </Button>
         <Group gap="xs">
           {readFile && (
-            <Button component={Link} to={readerUrl(book.id, readFile.hash)} color="teal" leftSection={<IconBook size={16} />}>
+            <Button component={Link} to={readerUrl(book.id, readFile.hash)} state={returnState} color="teal" leftSection={<IconBook size={16} />}>
               {lastRead && book.progress ? `Continue · ${Math.round(book.progress * 100)}%` : "Read"}
               {book.files.length > 1 ? ` (${readFile.format.toUpperCase()})` : ""}
             </Button>
@@ -216,13 +232,32 @@ function BookView({ book }: { book: BookDetailDto }) {
           <Stack gap="xs" maw={280}>
             <CoverThumb bookId={book.id} hasCover={book.hasCover} width="100%" size="full" version={book.updatedAt} />
             <Group gap="xs" justify="center">
-              <FileButton onChange={(f) => f && setCover.mutate(f)} accept="image/*">
-                {(props) => (
-                  <Button {...props} size="xs" variant="subtle" leftSection={<IconPhotoUp size={14} />} loading={setCover.isPending}>
-                    {book.hasCover ? "Replace cover" : "Upload cover"}
+              <Menu position="bottom" withinPortal>
+                <Menu.Target>
+                  <Button
+                    size="xs"
+                    variant="subtle"
+                    leftSection={<IconPhotoUp size={14} />}
+                    rightSection={<IconChevronDown size={12} />}
+                    loading={setCover.isPending}
+                  >
+                    {book.hasCover ? "Replace cover" : "Add cover"}
                   </Button>
-                )}
-              </FileButton>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  <Menu.Item leftSection={<IconUpload size={16} />} onClick={coverFile.open}>
+                    Upload an image…
+                  </Menu.Item>
+                  <Menu.Item leftSection={<IconCloudSearch size={16} />} onClick={() => setPickingCover(true)}>
+                    Choose from Open Library…
+                  </Menu.Item>
+                  {hasPdf && (
+                    <Menu.Item leftSection={<IconFileTypePdf size={16} />} onClick={() => setPickingPage(true)}>
+                      Use a page from the PDF…
+                    </Menu.Item>
+                  )}
+                </Menu.Dropdown>
+              </Menu>
               {book.hasCover && (
                 <Tooltip label="Remove cover">
                   <ActionIcon variant="subtle" color="gray" onClick={() => removeCover.mutate()} aria-label="Remove cover">
@@ -340,7 +375,7 @@ function BookView({ book }: { book: BookDetailDto }) {
                       </div>
                       {isReadable(f.format) && (
                         <Tooltip label="Read">
-                          <ActionIcon component={Link} to={readerUrl(book.id, f.hash)} variant="subtle" aria-label={`Read ${f.filename}`}>
+                          <ActionIcon component={Link} to={readerUrl(book.id, f.hash)} state={returnState} variant="subtle" aria-label={`Read ${f.filename}`}>
                             <IconBook size={16} />
                           </ActionIcon>
                         </Tooltip>
@@ -379,6 +414,8 @@ function BookView({ book }: { book: BookDetailDto }) {
       <EditBookModal book={book} opened={editing} onClose={() => setEditing(false)} />
       <MergeModal book={book} opened={merging} onClose={() => setMerging(false)} />
       <LookupModal book={book} opened={lookingUp} onClose={() => setLookingUp(false)} />
+      <CoverPickerModal book={book} opened={pickingCover} onClose={() => setPickingCover(false)} />
+      {hasPdf && <PdfPagePickerModal book={book} opened={pickingPage} onClose={() => setPickingPage(false)} />}
       <DeleteBooksModal
         opened={deleting !== undefined}
         onClose={() => setDeleting(undefined)}

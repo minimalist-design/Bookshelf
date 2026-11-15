@@ -9,7 +9,7 @@
 import { readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { PDFJS_KINDS, PDFJS_WORKER } from "../src/server/api/pdfjsAssets.ts";
+import { isPdfjsAsset, PDFJS_KINDS } from "../src/server/api/pdfjsAssets.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const { values: args } = parseArgs({
@@ -30,8 +30,7 @@ const pdfjsEmbedPlugin: Bun.BunPlugin = {
       const entries: string[] = [];
       for (const [kind, { dir }] of Object.entries(PDFJS_KINDS)) {
         for (const name of readdirSync(join(pdfjsDir, dir)).sort()) {
-          // The browser only requests the minified worker; skip the full one and its source map.
-          if (kind === "build" ? name !== "pdf.worker.min.mjs" : name.startsWith(".")) continue;
+          if (!isPdfjsAsset(kind, name)) continue; // e.g. the unminified worker, source maps, LICENSE files
           const id = `f${imports.length}`;
           imports.push(`import ${id} from ${JSON.stringify(join(pdfjsDir, dir, name))} with { type: "file" };`);
           entries.push(`  ${JSON.stringify(`${kind}/${name}`)}: ${id},`);
@@ -40,7 +39,6 @@ const pdfjsEmbedPlugin: Bun.BunPlugin = {
       const contents = [
         ...imports,
         `export const PDFJS_KINDS = ${JSON.stringify(PDFJS_KINDS)};`,
-        `export const PDFJS_WORKER = ${PDFJS_WORKER};`,
         `const FILES = new Map(Object.entries({\n${entries.join("\n")}\n}));`,
         `export function pdfjsAssetPath(kind, name) { return FILES.get(kind + "/" + name) ?? null; }`,
       ].join("\n");

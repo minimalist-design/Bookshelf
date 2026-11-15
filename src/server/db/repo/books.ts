@@ -270,8 +270,11 @@ export class BooksRepo {
       .run(hash, bookId, format);
   }
 
+  /** Bumps updated_at: the web UI uses it to bust the browser's cached cover image. */
   setHasCover(id: number, hasCover: boolean, source: string | null): void {
-    this.db.query("UPDATE books SET has_cover = ?, cover_source = ? WHERE id = ?").run(hasCover ? 1 : 0, source, id);
+    this.db
+      .query("UPDATE books SET has_cover = ?, cover_source = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+      .run(hasCover ? 1 : 0, source, id);
   }
 
   /** Deletes the row; hashes, author/tag links cascade. Orphaned authors/tags are pruned. */

@@ -172,6 +172,7 @@ describe("UI render smoke", () => {
     expect(html).toContain("x.pdf");
     expect(html).toContain("Reread");
     expect(html).toContain("2nd edition");
+    expect(html).toContain("Replace cover"); // opens the upload / Open Library menu
   });
 
   test("review queue with candidate comparison", () => {

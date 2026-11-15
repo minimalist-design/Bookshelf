@@ -1,10 +1,11 @@
 import { Badge, Card, Checkbox, Group, Progress, Rating, SimpleGrid, Table, Text, Tooltip } from "@mantine/core";
 import { IconCircleCheck } from "@tabler/icons-react";
 import type { DragEvent } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import type { BookSummaryDto } from "../../../shared/types.ts";
 import { CoverThumb } from "../CoverThumb.tsx";
 import { startBookDrag } from "./dnd.ts";
+import { returnState } from "./returnTo.ts";
 
 interface ViewProps {
   books: BookSummaryDto[];
@@ -43,6 +44,7 @@ export function ConfirmedMark({ book }: { book: BookSummaryDto }) {
 
 export function BookGrid({ books, selected, onToggle, selecting }: ViewProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   return (
     <SimpleGrid cols={{ base: 2, xs: 3, sm: 4, md: 5, lg: 6, xl: 8 }} spacing="md" verticalSpacing="lg">
       {books.map((b) => {
@@ -58,7 +60,7 @@ export function BookGrid({ books, selected, onToggle, selecting }: ViewProps) {
               outline: isSelected ? "2px solid var(--mantine-primary-color-filled)" : undefined,
               position: "relative",
             }}
-            onClick={(e) => (selecting || e.ctrlKey || e.metaKey ? onToggle(b) : navigate(`/books/${b.id}`))}
+            onClick={(e) => (selecting || e.ctrlKey || e.metaKey ? onToggle(b) : navigate(`/books/${b.id}`, { state: returnState(location) }))}
             draggable
             onDragStart={(e) => dragStart(e, b, selected)}
           >
@@ -102,6 +104,7 @@ export function BookGrid({ books, selected, onToggle, selecting }: ViewProps) {
 }
 
 export function BookList({ books, selected, onToggle }: ViewProps) {
+  const location = useLocation();
   const allSelected = books.length > 0 && books.every((b) => selected.has(b.id));
   return (
     <Table.ScrollContainer minWidth={760}>
@@ -141,7 +144,7 @@ export function BookList({ books, selected, onToggle }: ViewProps) {
               </Table.Td>
               <Table.Td>
                 <Group gap={6} wrap="nowrap">
-                  <Text component={Link} to={`/books/${b.id}`} size="sm" fw={500} lineClamp={2} style={{ textDecoration: "none", color: "inherit" }}>
+                  <Text component={Link} to={`/books/${b.id}`} state={returnState(location)} size="sm" fw={500} lineClamp={2} style={{ textDecoration: "none", color: "inherit" }}>
                     {b.title}
                   </Text>
                   <ConfirmedMark book={b} />

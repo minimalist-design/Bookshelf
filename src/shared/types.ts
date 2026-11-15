@@ -343,6 +343,30 @@ export interface LookupResult {
   errors: string[];
 }
 
+/** One cover image of an Open Library edition (or work), for picking a cover without touching the other metadata. */
+export interface CoverOption {
+  coverUrl: string;
+  /** Open Library page of the edition (or of the work, for search results). */
+  url: string;
+  title: string;
+  subtitle: string | null;
+  authors: string[];
+  /** Short description, e.g. "Ace Books · Ace ed. · 1987 · 535 pages · Paperback". */
+  details: string;
+  /** ISO 639-1 code when known. */
+  language: string | null;
+  isbn13: string | null;
+  /** The book's own edition (same ISBN). */
+  thisEdition: boolean;
+}
+
+export interface CoverSearchResult {
+  bookId: number;
+  options: CoverOption[];
+  /** Problems talking to a source (network errors etc.). */
+  errors: string[];
+}
+
 export interface ApplyMetadataRequest {
   candidate: MetadataCandidate;
   fields: MetadataField[];
