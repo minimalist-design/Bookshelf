@@ -82,10 +82,11 @@ has taken it, Bookshelf exits with an error naming it instead of moving elsewher
 
 #### Service info
 
-`bookshelf service-info` prints what [ServiceMan](https://github.com/objectiveprover/ServiceMan) and
+`bookshelf serviceman-info` prints what [ServiceMan](https://github.com/objectiveprover/ServiceMan) and
 [CaddyMan](https://github.com/objectiveprover/CaddyMan) need to set Bookshelf up: the command, port (`null` before the
-first start), health-check path, config and env file, and suggested reverse proxy settings. It reads only the config
-file, so it works before the service has ever run.
+first start), health-check path, config and env file, and suggested reverse proxy settings. `bookshelf caddyman-info`
+is the same command (each tool asks with its own name). It reads only the config file, so it works before the service
+has ever run.
 
 > **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
 > the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`

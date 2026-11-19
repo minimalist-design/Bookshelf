@@ -9,7 +9,8 @@ export const USAGE = `usage:
                                      (existing settings and values are never changed)
   bookshelf config path              print where the config file is
   bookshelf config template          print the default config
-  bookshelf service-info             describe the service as JSON (for ServiceMan and CaddyMan)
+  bookshelf serviceman-info          describe the service as JSON (for ServiceMan and CaddyMan;
+                                     caddyman-info is the same command)
 
 config: ${tilde(configPath())}
 `;

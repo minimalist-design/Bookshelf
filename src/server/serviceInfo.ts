@@ -1,12 +1,16 @@
 /**
- * `bookshelf service-info`: describes the service as JSON so ServiceMan (the systemd unit) and CaddyMan (the reverse
- * proxy site) can fill in their forms. It reads only the config file: no network, and it works before the first start.
+ * `bookshelf serviceman-info` (alias `caddyman-info`): describes the service as JSON so ServiceMan (the systemd unit)
+ * and CaddyMan (the reverse proxy site) can fill in their forms. Both commands print the same thing. It reads only the config file: no network, and it works before the first start.
  */
 import { configPath, readConfigFile, tilde } from "./configFile.ts";
 
+/** The commands that print the service info; each tool asks with its own name. */
+export const SERVICE_INFO_COMMANDS = ["serviceman-info", "caddyman-info"];
+
 export interface ServiceInfo {
-  /** Format version; raised only when a field is renamed or removed. */
-  service_info: 1;
+  /** Format version, under each tool's name; raised only when a field is renamed or removed. */
+  serviceman_info: 1;
+  caddyman_info: 1;
   name: string;
   description: string;
   /** What follows the binary in ExecStart=. */
@@ -25,7 +29,8 @@ export interface ServiceInfo {
 export function serviceInfo(path: string = configPath()): ServiceInfo {
   const port = readConfigFile(path).port;
   return {
-    service_info: 1,
+    serviceman_info: 1,
+    caddyman_info: 1,
     name: "bookshelf",
     description: "Bookshelf ebook library",
     args: [],

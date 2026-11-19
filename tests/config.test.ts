@@ -16,7 +16,7 @@ import {
   writeConfigPort,
 } from "../src/server/configFile.ts";
 import { listen, PortError } from "../src/server/listen.ts";
-import { serviceInfo } from "../src/server/serviceInfo.ts";
+import { SERVICE_INFO_COMMANDS, serviceInfo } from "../src/server/serviceInfo.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "bookshelf-config-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -169,12 +169,41 @@ describe("port", () => {
   });
 });
 
-describe("service-info", () => {
+describe("serviceman-info / caddyman-info", () => {
   test("reports the configured port, or null before the first start", () => {
     const info = serviceInfo(file(CONFIG_TEMPLATE));
-    expect(info).toMatchObject({ service_info: 1, name: "bookshelf", args: [], port: null, health_path: "/api/health" });
+    expect(info).toMatchObject({
+      serviceman_info: 1,
+      caddyman_info: 1,
+      name: "bookshelf",
+      args: [],
+      port: null,
+      health_path: "/api/health",
+    });
     expect(info.env_file).toBe("~/.secrets/bookshelf.env");
     expect(serviceInfo(file('{"port": 20005}')).port).toBe(20005);
     expect(serviceInfo(file()).port).toBeNull();
+  });
+
+  test("both commands print the same JSON; the old name is unknown", () => {
+    const home = mkdtempSync(join(tmpdir(), "bookshelf-info-"));
+    try {
+      const run = (cmd: string) =>
+        Bun.spawnSync(["bun", join(import.meta.dir, "..", "src/server/index.ts"), cmd], {
+          env: { ...process.env, XDG_CONFIG_HOME: home },
+        });
+      const outs = SERVICE_INFO_COMMANDS.map((cmd) => {
+        const p = run(cmd);
+        expect(p.exitCode).toBe(0);
+        return p.stdout.toString();
+      });
+      expect(SERVICE_INFO_COMMANDS).toEqual(["serviceman-info", "caddyman-info"]);
+      const [first, second] = outs;
+      expect(second).toBe(first);
+      expect(JSON.parse(first ?? "")).toMatchObject({ serviceman_info: 1, caddyman_info: 1, name: "bookshelf" });
+      expect(run("service-info").exitCode).toBe(2);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
