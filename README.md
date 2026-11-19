@@ -34,7 +34,7 @@ exist. Delete a file in your file manager and it disappears from the library; co
 
 ```sh
 bun install
-bun run dev        # development: hot reload, http://localhost:3000
+bun run dev        # development: hot reload (the URL is printed at startup)
 bun run start      # production
 bun run build      # single-file executable in dist/ (see below)
 ```
@@ -57,7 +57,7 @@ default too. Paths may start with `~`.
 | `library_root` | — | Library directory; overrides (and locks) the UI setting |
 | `data_dir` | `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf` | Database and cover images (must not be inside the library) |
 | `host` | `0.0.0.0` | Bind address |
-| `port` | `3000` | HTTP port |
+| `port` | `0` | HTTP port; `0` means not assigned yet (see [Port](#port)) |
 | `max_upload_mb` | `16384` | Largest accepted upload |
 
 ```sh
@@ -71,8 +71,21 @@ The server warns at startup when the config is older than the current version. (
 `bun src/server/index.ts config …`.)
 
 Secrets go in an env file outside the repo and `~/.config` (default `~/.secrets/bookshelf.env`, mode 600), given to
-the service with systemd's `EnvironmentFile=`. Bookshelf needs none yet; [`.env.example`](.env.example) lists the
-variables (currently none).
+the service with systemd's `EnvironmentFile=`. Bookshelf needs no secrets, so [`.env.example`](.env.example) has no
+variables.
+
+#### Port
+
+The first start picks the first free port from 20000 to 20999 and writes it into the config as `port` (only that value
+changes; the rest of the file is left as it was). From then on Bookshelf always uses that port: if another program
+has taken it, Bookshelf exits with an error naming it instead of moving elsewhere. To change it, edit `port` by hand.
+
+#### Service info
+
+`bookshelf service-info` prints what [ServiceMan](https://github.com/objectiveprover/ServiceMan) and
+[CaddyMan](https://github.com/objectiveprover/CaddyMan) need to set Bookshelf up: the command, port (`null` before the
+first start), health-check path, config and env file, and suggested reverse proxy settings. It reads only the config
+file, so it works before the service has ever run.
 
 > **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
 > the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`
@@ -95,8 +108,8 @@ make clean        # remove ./bookshelf
 
 - copies `config.template.json` to `~/.config/bookshelf/config.json` if there is none. If there is one, it asks:
   **Keep** it (default), **Update** it (`bookshelf config update`: adds new settings, changes nothing else), or
-  **Replace** it with the template after backing it up as `config.json.YYYYMMDD-HHMMSS.bak`. Without a terminal the
-  existing config is always kept.
+  **Replace** it with the template after backing it up as `config.json.YYYYMMDD-HHMMSS.bak` (the old `port` is kept).
+  Without a terminal the existing config is always kept.
 - asks where the env file goes (default `~/.secrets/bookshelf.env`), creates the directory if needed (`~/.secrets`
   with mode 700) and copies `.env.example` there with mode 600 — only if the file doesn't exist yet.
 - doesn't create or restart a systemd unit: the service is managed with serviceman (give it the env file in the New
@@ -162,7 +175,7 @@ bun test            # unit + integration tests (temp directories, recorded HTTP 
 bun run typecheck
 ```
 
-`PLAN.md` documents the design decisions. Layout:
+Layout:
 
 ```
 src/server/   Bun.serve entry, API routes, services, library index/scanner/watcher, extractors, metadata sources

@@ -23,6 +23,7 @@ export interface ConfigFileSettings {
   /** Database and covers. Empty: `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf`. */
   data_dir?: string;
   host?: string;
+  /** 0: not assigned yet; the first start picks a free one in 20000–20999 and writes it here. */
   port?: number;
   max_upload_mb?: number;
 }
@@ -81,6 +82,10 @@ export function readConfigFile(path: string = configPath()): ConfigFileSettings 
       throw new ConfigError(`${tilde(path)}: "${key}" must be a ${type}`);
     }
   }
+  const port = raw.port;
+  if (typeof port === "number" && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+    throw new ConfigError(`${tilde(path)}: "port" must be 0 (one is picked on first start) or 1–65535`);
+  }
   return raw as ConfigFileSettings;
 }
 
@@ -120,6 +125,43 @@ export function updateConfigFile(path: string = configPath()): UpdateResult {
   for (const k of added) out[k] = TEMPLATE[k];
   writeAtomic(path, JSON.stringify(out, null, 2) + "\n");
   return { created: false, added, oldVersion, newVersion };
+}
+
+/**
+ * Writes `port` into the config, changing only that value: the rest of the file (formatting, key order, other
+ * values) is left as it was. A missing `port` key is added at the top; a missing file is created from the template.
+ */
+export function writeConfigPort(path: string, port: number): void {
+  if (!existsSync(path)) {
+    writeAtomic(path, setPortText(CONFIG_TEMPLATE, port) ?? CONFIG_TEMPLATE);
+    return;
+  }
+  const text = readFileSync(path, "utf8");
+  const updated = setPortText(text, port);
+  if (updated === null) throw new ConfigError(`${tilde(path)}: couldn't write the port; set "port": ${port} by hand`);
+  writeAtomic(path, updated);
+}
+
+/** The JSON text with its top-level `port` set, or null when that can't be done without touching anything else. */
+export function setPortText(text: string, port: number): string | null {
+  const before = JSON.parse(text) as Record<string, unknown>;
+  const re = /("port"\s*:\s*)(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|null)/;
+  let out: string;
+  if ("port" in before) {
+    out = text.replace(re, `$1${port}`);
+  } else {
+    const open = text.indexOf("{");
+    const empty = Object.keys(before).length === 0;
+    out = text.slice(0, open + 1) + `\n  "port": ${port}` + (empty ? "\n" : ",") + text.slice(open + 1).replace(/^\s*(?=\})/, "");
+  }
+  // Only accept the result when it is exactly the old config with the new port.
+  let after: unknown;
+  try {
+    after = JSON.parse(out);
+  } catch {
+    return null;
+  }
+  return Bun.deepEquals(after, { ...before, port }) ? out : null;
 }
 
 function writeAtomic(path: string, text: string): void {

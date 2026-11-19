@@ -2,12 +2,14 @@
 import { configPath, CONFIG_TEMPLATE, CURRENT_VERSION, expandTilde, fileVersion, tilde, updateConfigFile } from "./configFile.ts";
 
 export const USAGE = `usage:
-  bookshelf                          start the server
+  bookshelf                          start the server (the first start picks a port in 20000–20999
+                                     and saves it in the config)
   bookshelf config version [CONFIG]  show the config's version and the current one
   bookshelf config update [CONFIG]   add new settings to the config and raise its version
                                      (existing settings and values are never changed)
   bookshelf config path              print where the config file is
   bookshelf config template          print the default config
+  bookshelf service-info             describe the service as JSON (for ServiceMan and CaddyMan)
 
 config: ${tilde(configPath())}
 `;

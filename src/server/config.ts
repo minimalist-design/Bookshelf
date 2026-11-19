@@ -7,7 +7,8 @@ export interface AppConfig {
   dataDir: string;
   dbPath: string;
   coversDir: string;
-  port: number;
+  /** The configured port; null when none is assigned yet (`"port": 0`), and one is picked on first start. */
+  port: number | null;
   hostname: string;
   /** Library root set in the config file (`library_root`); overrides and locks the UI setting when present. */
   configLibraryRoot: string | null;
@@ -27,7 +28,7 @@ export function loadConfig(file: ConfigFileSettings = {}, env: Record<string, st
     dataDir,
     dbPath: join(dataDir, "bookshelf.db"),
     coversDir: join(dataDir, "covers"),
-    port: file.port ?? 3000,
+    port: file.port ? file.port : null,
     hostname: file.host || "0.0.0.0",
     configLibraryRoot: file.library_root ? resolve(expandTilde(file.library_root)) : null,
     // `process.env.NODE_ENV` is inlined as "production" by `scripts/build.ts`, so the compiled binary is always production.

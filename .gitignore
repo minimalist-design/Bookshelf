@@ -6,3 +6,4 @@ data/
 *.db-*
 dist/
 /bookshelf
+PLAN.md

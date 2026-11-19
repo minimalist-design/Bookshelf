@@ -23,7 +23,7 @@ node_modules: package.json bun.lock
 
 # An existing config is never changed without asking: Keep (default),
 # Update (add the template's missing settings; nothing is removed or changed),
-# or Replace (after a timestamped backup). Without a terminal it is kept.
+# or Replace (after a timestamped backup; the old config's port is kept). Without a terminal it is kept.
 #
 # The env file's location is asked for (default ~/.secrets/bookshelf.env). An
 # existing env file is never touched; a new one is copied from .env.example.
@@ -44,6 +44,7 @@ install: build
 		r|R) backup="$(CONFIG).$$(date +%Y%m%d-%H%M%S).bak"; \
 		     cp -p "$(CONFIG)" "$$backup"; \
 		     install -m644 $(TEMPLATE) "$(CONFIG)"; \
+		     bun scripts/carry-port.ts "$$backup" "$(CONFIG)"; \
 		     echo "replaced $(CONFIG) (backup: $$backup)" ;; \
 		*)   echo "kept $(CONFIG)" ;; \
 		esac; \
