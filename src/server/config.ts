@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { mkdirSync } from "node:fs";
+import { expandTilde, type ConfigFileSettings } from "./configFile.ts";
 
 export interface AppConfig {
   dataDir: string;
@@ -8,26 +9,30 @@ export interface AppConfig {
   coversDir: string;
   port: number;
   hostname: string;
-  /** Library root forced by environment; overrides the DB setting when present. */
-  envLibraryRoot: string | null;
+  /** Library root set in the config file (`library_root`); overrides and locks the UI setting when present. */
+  configLibraryRoot: string | null;
   isProduction: boolean;
-  /** Largest accepted upload (BOOKSHELF_MAX_UPLOAD_MB, default 16 GiB). */
+  /** Largest accepted upload (`max_upload_mb`, default 16 GiB). */
   maxUploadBytes: number;
 }
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
+/**
+ * Turns the config file's settings into the app's config, filling in defaults. `env` only supplies
+ * `XDG_DATA_HOME` (the default data directory) and `NODE_ENV`.
+ */
+export function loadConfig(file: ConfigFileSettings = {}, env: Record<string, string | undefined> = process.env): AppConfig {
   const xdgData = env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-  const dataDir = resolve(env.BOOKSHELF_DATA_DIR || join(xdgData, "bookshelf"));
+  const dataDir = resolve(file.data_dir ? expandTilde(file.data_dir) : join(xdgData, "bookshelf"));
   return {
     dataDir,
     dbPath: join(dataDir, "bookshelf.db"),
     coversDir: join(dataDir, "covers"),
-    port: Number(env.BOOKSHELF_PORT || env.PORT || 3000),
-    hostname: env.BOOKSHELF_HOST || "0.0.0.0",
-    envLibraryRoot: env.BOOKSHELF_LIBRARY_ROOT ? resolve(env.BOOKSHELF_LIBRARY_ROOT) : null,
+    port: file.port ?? 3000,
+    hostname: file.host || "0.0.0.0",
+    configLibraryRoot: file.library_root ? resolve(expandTilde(file.library_root)) : null,
     // `process.env.NODE_ENV` is inlined as "production" by `scripts/build.ts`, so the compiled binary is always production.
     isProduction: env.NODE_ENV === "production" || process.env.NODE_ENV === "production",
-    maxUploadBytes: Number(env.BOOKSHELF_MAX_UPLOAD_MB || 16 * 1024) * 1024 * 1024,
+    maxUploadBytes: (file.max_upload_mb ?? 16 * 1024) * 1024 * 1024,
   };
 }
 

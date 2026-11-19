@@ -50,7 +50,7 @@ const book: BookDetailDto = {
 
 const settings: SettingsDto = {
   libraryRoot: "/lib",
-  libraryRootFromEnv: false,
+  libraryRootFromConfig: false,
   contactEmail: null,
   dataDir: "/data",
   tools: { sevenZip: true, unrar: false, djvused: true, ddjvu: true, pdftoppm: true },

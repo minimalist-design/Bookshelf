@@ -7,7 +7,7 @@ export function getSettings(app: AppContext): SettingsDto {
   const t = app.tools;
   return {
     libraryRoot: app.libraryRoot(),
-    libraryRootFromEnv: app.config.envLibraryRoot !== null,
+    libraryRootFromConfig: app.config.configLibraryRoot !== null,
     contactEmail: app.settings.get("contactEmail"),
     dataDir: app.config.dataDir,
     tools: {
@@ -24,7 +24,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export function updateSettings(app: AppContext, update: SettingsUpdate): SettingsDto {
   if (update.libraryRoot !== undefined) {
-    if (app.config.envLibraryRoot) throw new ValidationError("Library root is set by BOOKSHELF_LIBRARY_ROOT");
+    if (app.config.configLibraryRoot) throw new ValidationError("Library root is set in the config file (library_root)");
     let root: string | null = null; // null unlinks the library only: files and directories stay as they are
     if (update.libraryRoot !== null) {
       root = update.createLibraryRoot
@@ -46,11 +46,12 @@ export function updateSettings(app: AppContext, update: SettingsUpdate): Setting
 }
 
 /**
- * Create a missing BOOKSHELF_LIBRARY_ROOT, but only the first time this path is configured: later on, a missing
+ * Create a missing `library_root` from the config file, but only the first time this path is configured: later on, a missing
  * root more likely means an unmounted drive, which must stay "unavailable" rather than be replaced by an empty folder.
  */
-export function prepareEnvLibraryRoot(app: AppContext): void {
-  const root = app.config.envLibraryRoot;
+export function prepareConfigLibraryRoot(app: AppContext): void {
+  const root = app.config.configLibraryRoot;
+  // The setting key predates the config file (the root used to come from an environment variable).
   if (!root || app.settings.get("envLibraryRootSeen") === root) return;
   if (!existsSync(root)) {
     try {

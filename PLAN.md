@@ -26,7 +26,7 @@ SQLite for **metadata only**. The filesystem is the single source of truth for *
 | Metadata retention | A row is **confirmed** if accepted from an external source (Open Library / DOI) **or edited manually**. When a book's last file disappears (in-app delete *or* external removal), confirmed rows are kept and unconfirmed rows are deleted |
 | Shelf deletion | Never deletes books: book files are moved to the root (Unshelved), then the directory is removed |
 | FS sync | Live recursive watcher + full scan at startup; UI updates over WebSocket |
-| Root selection | First-run UI with server-side directory browser; stored in DB; `BOOKSHELF_LIBRARY_ROOT` env overrides |
+| Root selection | First-run UI with server-side directory browser; stored in DB; `library_root` in the config file overrides |
 | Stack | `Bun.serve` + HTML imports (HMR in dev), React, Mantine, raw `bun:sqlite` + numbered SQL migrations, `bun test` |
 | External tools | Optional: `7z`/`unrar` (CBR), `djvused`/`ddjvu` (DJVU), `pdftoppm` (PDF cover). Detected at startup; absent → filename-only for that format. (None currently installed on this machine) |
 | UI v1 | Shelf mgmt + moving books, search/sort/filter (FTS5), grid/list, download, in-browser reading, delete, tags/series/rating/notes, merge/detach files |
@@ -91,7 +91,7 @@ tests/
   *.test.ts
 ```
 
-Data dir: `BOOKSHELF_DATA_DIR` (default `~/.local/share/bookshelf`) holds `bookshelf.db` and `covers/`.
+Data dir: `data_dir` in `~/.config/bookshelf/config.json` (default `~/.local/share/bookshelf`) holds `bookshelf.db` and `covers/`.
 It must not be inside the library root (validated when the root is set).
 
 Libraries: `react`, `react-dom`, `@mantine/core|hooks|dropzone|notifications`, `@tanstack/react-query`,
@@ -244,7 +244,7 @@ the UI uploads 2 at a time with per-file progress). 201 imported/reconnected, 20
 
 1. Validate extension and shelf (must be an existing first-level directory; omitted = Unshelved); wait for any running scan.
 2. Stream to `{root}/.bookshelf-incoming/{uuid}.{ext}` (same filesystem → atomic rename), hashing while writing;
-   limit `BOOKSHELF_MAX_UPLOAD_MB` (default 16 GiB). The staging dir is removed when no upload is in flight.
+   limit `max_upload_mb` in the config file (default 16 GiB). The staging dir is removed when no upload is in flight.
 3. Same content already on disk → `duplicate` (before any extraction).
 4. Extract + merge metadata (§6) using the *original* filename.
 5. Under the linker lock: same ID with an on-disk file of the same format → `duplicate`. Content hash or ID of a kept

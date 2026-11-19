@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
-import { getSettings, prepareEnvLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
+import type { ConfigFileSettings } from "../src/server/configFile.ts";
+import { getSettings, prepareConfigLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
 import { browseDirectories, makeDirectory } from "../src/server/api/fsBrowse.ts";
 import { ConflictError, NotFoundError } from "../src/server/api/http.ts";
 import { validateShelfName, ValidationError } from "../src/server/library/paths.ts";
@@ -16,9 +17,9 @@ afterAll(async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-function makeApp(env: Record<string, string> = {}) {
+function makeApp(file: ConfigFileSettings = {}) {
   const dataDir = join(tmp, `data-${Math.random().toString(36).slice(2)}`);
-  const app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: dataDir, ...env }));
+  const app = createApp(loadConfig({ data_dir: dataDir, ...file }));
   apps.push(app);
   return app;
 }
@@ -62,21 +63,21 @@ describe("settings", () => {
     expect(() => updateSettings(app, { libraryRoot: "relative/x", createLibraryRoot: true })).toThrow(ValidationError);
   });
 
-  test("a missing env library root is created only the first time", () => {
+  test("a missing config library root is created only the first time", () => {
     const lib = join(tmp, "envcreated", "lib");
-    const app = makeApp({ BOOKSHELF_LIBRARY_ROOT: lib });
-    prepareEnvLibraryRoot(app);
+    const app = makeApp({ library_root: lib });
+    prepareConfigLibraryRoot(app);
     expect(existsSync(lib)).toBe(true);
     rmSync(lib, { recursive: true });
-    prepareEnvLibraryRoot(app); // e.g. drive unmounted later: leave it missing
+    prepareConfigLibraryRoot(app); // e.g. drive unmounted later: leave it missing
     expect(existsSync(lib)).toBe(false);
   });
 
-  test("env override wins and locks the setting", () => {
+  test("the config file's library root wins and locks the setting", () => {
     const lib = join(tmp, "envlib");
     mkdirSync(lib, { recursive: true });
-    const app = makeApp({ BOOKSHELF_LIBRARY_ROOT: lib });
-    expect(getSettings(app)).toMatchObject({ libraryRoot: lib, libraryRootFromEnv: true });
+    const app = makeApp({ library_root: lib });
+    expect(getSettings(app)).toMatchObject({ libraryRoot: lib, libraryRootFromConfig: true });
     expect(() => updateSettings(app, { libraryRoot: lib })).toThrow(ValidationError);
     expect(() => updateSettings(app, { libraryRoot: null })).toThrow(ValidationError);
   });

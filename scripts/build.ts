@@ -3,7 +3,7 @@
  * Builds a self-contained executable: server, pre-bundled web app, SQL migrations and pdf.js assets, all in one
  * file with no `node_modules` needed at runtime.
  *
- *   bun run build                    → dist/bookshelf (current platform)
+ *   bun run build                    → dist/bookshelf (current platform; `make build` writes ./bookshelf)
  *   bun run build --target=linux-arm64 --outfile=dist/bookshelf-arm64
  */
 import { readdirSync, rmSync, statSync } from "node:fs";
@@ -54,7 +54,8 @@ const result = await Bun.build({
   compile: {
     outfile,
     ...(args.target ? { target: args.target as Bun.Build.CompileTarget } : {}),
-    // Configuration comes from BOOKSHELF_* environment variables, not from files in the working directory.
+    // Configuration comes from ~/.config/bookshelf/config.json (see src/server/configFile.ts), not from files in the
+    // working directory; secrets, if any, come from the environment (systemd EnvironmentFile=).
     autoloadDotenv: false,
     autoloadBunfig: false,
   },

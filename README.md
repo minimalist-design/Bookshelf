@@ -42,43 +42,66 @@ bun run build      # single-file executable in dist/ (see below)
 On first start the web UI asks for the library directory (a server-side folder browser, which can also create
 folders). A typed path that doesn't exist yet is created, including missing parent folders. It can be changed later in
 *Settings*, or removed there (only the link is dropped — no files are deleted — and the first-start screen is shown
-again), or fixed with `BOOKSHELF_LIBRARY_ROOT` — a missing directory given there is created the first time the
-server starts with it; afterwards a missing directory is reported as unavailable (e.g. an unmounted drive).
+again), or fixed with `library_root` in the config file — a missing directory given there is created the first time
+the server starts with it; afterwards a missing directory is reported as unavailable (e.g. an unmounted drive).
 
-| Variable | Default | Meaning |
+### Configuration
+
+Settings live in `~/.config/bookshelf/config.json` (`$XDG_CONFIG_HOME` is honoured), installed by `make install` from
+[`config.template.json`](config.template.json). Without the file the defaults below are used; empty values mean the
+default too. Paths may start with `~`.
+
+| Setting | Default | Meaning |
 |---|---|---|
-| `BOOKSHELF_LIBRARY_ROOT` | — | Library directory; overrides (and locks) the UI setting |
-| `BOOKSHELF_DATA_DIR` | `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf` | Database and cover images (must not be inside the library) |
-| `BOOKSHELF_PORT` / `PORT` | `3000` | HTTP port |
-| `BOOKSHELF_HOST` | `0.0.0.0` | Bind address |
-| `BOOKSHELF_MAX_UPLOAD_MB` | `16384` | Largest accepted upload |
+| `version` | — | Config format version; see `bookshelf config version` |
+| `library_root` | — | Library directory; overrides (and locks) the UI setting |
+| `data_dir` | `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf` | Database and cover images (must not be inside the library) |
+| `host` | `0.0.0.0` | Bind address |
+| `port` | `3000` | HTTP port |
+| `max_upload_mb` | `16384` | Largest accepted upload |
+
+```sh
+bookshelf config path       # where the config file is
+bookshelf config template   # the default config
+bookshelf config version    # the file's version and the current one
+bookshelf config update     # add settings that are new in this version (never changes existing ones)
+```
+
+The server warns at startup when the config is older than the current version. (In development, use
+`bun src/server/index.ts config …`.)
+
+Secrets go in an env file outside the repo and `~/.config` (default `~/.secrets/bookshelf.env`, mode 600), given to
+the service with systemd's `EnvironmentFile=`. Bookshelf needs none yet; [`.env.example`](.env.example) lists the
+variables (currently none).
 
 > **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
 > the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`
 > WebSocket).
 
-## Standalone executable and systemd
+## Standalone executable and service
 
-`bun run build` compiles everything (server, web app, pdf.js assets and the Bun runtime) into a single
-self-contained executable, `dist/bookshelf` (~115 MB), which needs neither Bun nor `node_modules` to run. It is
-built for the current platform; pass e.g. `--target=linux-arm64 --outfile=dist/bookshelf-arm64` to cross-compile.
-It always runs in production mode, and is configured with the same environment variables as above. The optional
-tools are still found on `PATH`.
-
-To run it as a systemd user service:
+`make build` compiles everything (server, web app, pdf.js assets and the Bun runtime) into a single self-contained
+executable, `./bookshelf` (~115 MB), which needs neither Bun nor `node_modules` to run. It is built for the current
+platform (`bun run build --target=linux-arm64 --outfile=dist/bookshelf-arm64` cross-compiles). It always runs in
+production mode. The optional tools are still found on `PATH`.
 
 ```sh
-bun run build
-install -Dm755 dist/bookshelf ~/.local/bin/bookshelf
-install -Dm644 contrib/bookshelf.service ~/.config/systemd/user/bookshelf.service
-systemctl --user edit bookshelf          # optional: set Environment=BOOKSHELF_… overrides
-systemctl --user daemon-reload
-systemctl --user enable --now bookshelf
-loginctl enable-linger "$USER"           # keep it running when you are not logged in (and start at boot)
-journalctl --user -u bookshelf -f        # logs
+make install      # build, then install ~/.local/bin/bookshelf, the config and the env file
+make uninstall    # remove ~/.local/bin/bookshelf (config and env file are kept)
+make clean        # remove ./bookshelf
 ```
 
-To update, rebuild, `install` the new binary again and `systemctl --user restart bookshelf`.
+`make install`:
+
+- copies `config.template.json` to `~/.config/bookshelf/config.json` if there is none. If there is one, it asks:
+  **Keep** it (default), **Update** it (`bookshelf config update`: adds new settings, changes nothing else), or
+  **Replace** it with the template after backing it up as `config.json.YYYYMMDD-HHMMSS.bak`. Without a terminal the
+  existing config is always kept.
+- asks where the env file goes (default `~/.secrets/bookshelf.env`), creates the directory if needed (`~/.secrets`
+  with mode 700) and copies `.env.example` there with mode 600 — only if the file doesn't exist yet.
+- doesn't create or restart a systemd unit: the service is managed with serviceman (give it the env file in the New
+  service form or with `M-x set-env-file`), which restarts it when the binary in `~/.local/bin` is replaced.
+  [`contrib/bookshelf.service`](contrib/bookshelf.service) is a plain systemd user unit for use without serviceman.
 
 At startup pdf.js prints warnings about `@napi-rs/canvas`, `DOMMatrix` and `Path2D`. They are harmless: the server
 only reads PDF metadata and never renders with pdf.js.

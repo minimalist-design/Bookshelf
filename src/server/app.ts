@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { detectExternalTools, ensureDataDirs, loadConfig, type AppConfig, type ExternalTools } from "./config.ts";
+import { readConfigFile } from "./configFile.ts";
 import { openDatabase } from "./db/index.ts";
 import { BooksRepo } from "./db/repo/books.ts";
 import { HashCacheRepo } from "./db/repo/hashCache.ts";
@@ -34,7 +35,7 @@ export interface AppContext {
   lookup: LookupService;
   reader: ReaderService;
   maintenance: MaintenanceService;
-  /** Effective library root: env override, else the stored setting. */
+  /** Effective library root: config file override, else the stored setting. */
   libraryRoot(): string | null;
 }
 
@@ -43,7 +44,7 @@ export interface CreateAppOptions {
   http?: HttpClientOptions;
 }
 
-export function createApp(config: AppConfig = loadConfig(), options: CreateAppOptions = {}): AppContext {
+export function createApp(config: AppConfig = loadConfig(readConfigFile()), options: CreateAppOptions = {}): AppContext {
   ensureDataDirs(config);
   const db = openDatabase(config.dbPath);
   const settings = new SettingsRepo(db);
@@ -96,6 +97,6 @@ export function createApp(config: AppConfig = loadConfig(), options: CreateAppOp
     reader: new ReaderService({ library, books, tools }),
     maintenance: new MaintenanceService({ config, db, library, books, covers, bookService, events }),
     shelfService: new ShelfService({ library, hashCache, events }),
-    libraryRoot: () => config.envLibraryRoot ?? settings.get("libraryRoot"),
+    libraryRoot: () => config.configLibraryRoot ?? settings.get("libraryRoot"),
   };
 }

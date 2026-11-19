@@ -1,48 +1,25 @@
-import index from "../web/index.html";
-import { createApp } from "./app.ts";
-import { apiRoutes } from "./api/router.ts";
-import { prepareEnvLibraryRoot } from "./api/settings.ts";
+/**
+ * Entry point of `bookshelf` (and of the compiled executable): no arguments starts the server, `config …` manages
+ * the config file. The server is imported only when it is started, so `config` commands have no side effects.
+ */
+import { configCommand, USAGE } from "./cli.ts";
+import { ConfigError } from "./configFile.ts";
 
-const app = createApp();
-prepareEnvLibraryRoot(app);
-const EVENTS_TOPIC = "events";
+const [command, ...args] = Bun.argv.slice(2);
 
-const server = Bun.serve({
-  port: app.config.port,
-  hostname: app.config.hostname,
-  maxRequestBodySize: app.config.maxUploadBytes,
-  idleTimeout: 255, // seconds; slow uploads of large files
-  routes: {
-    ...apiRoutes(app),
-    "/ws": (req, srv) =>
-      srv.upgrade(req) ? undefined : new Response("WebSocket upgrade expected", { status: 400 }),
-    // SPA: every other path serves the React app.
-    "/*": index,
-  },
-  websocket: {
-    open(ws) {
-      ws.subscribe(EVENTS_TOPIC);
-      ws.send(JSON.stringify({ type: "library.status", status: app.library.status() }));
-    },
-    message() {
-      /* server → client only */
-    },
-  },
-  development: app.config.isProduction ? false : { hmr: true, console: true },
-});
-
-app.events.subscribe((event) => server.publish(EVENTS_TOPIC, JSON.stringify(event)));
-
-console.log(`Bookshelf running at ${server.url}`);
-console.log(`Data directory: ${app.config.dataDir}`);
-const root = app.libraryRoot();
-console.log(`Library root: ${root ?? "(not configured — open the web UI to choose one)"}`);
-app.library.open(root).catch((err) => console.error("Library scan failed:", err));
-
-const shutdown = async () => {
-  await app.library.close();
-  app.db.close();
-  process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+try {
+  if (command === undefined) {
+    await import("./serve.ts");
+  } else if (command === "config") {
+    process.exit(configCommand(args));
+  } else if (command === "help" || command === "-h" || command === "--help") {
+    process.stdout.write(USAGE);
+  } else {
+    process.stderr.write(`bookshelf: unknown command "${command}"\n\n${USAGE}`);
+    process.exit(2);
+  }
+} catch (err) {
+  if (!(err instanceof ConfigError)) throw err;
+  console.error(`bookshelf: ${err.message}`);
+  process.exit(1);
+}

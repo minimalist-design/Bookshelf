@@ -16,7 +16,7 @@ beforeEach(() => {
   root = join(tmp, "library");
   mkdirSync(join(root, "A"), { recursive: true });
   mkdirSync(join(root, "B"), { recursive: true });
-  app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data") }), { library: { debounceMs: 30, stableMs: 80, graceMs: 60_000 } });
+  app = createApp(loadConfig({ data_dir: join(tmp, "data") }), { library: { debounceMs: 30, stableMs: 80, graceMs: 60_000 } });
 });
 
 afterEach(async () => {

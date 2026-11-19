@@ -32,9 +32,9 @@ export function Settings() {
         <Stack gap="xs">
           <Title order={4}>Library root</Title>
           <Text ff="monospace">{s.libraryRoot}</Text>
-          {s.libraryRootFromEnv ? (
+          {s.libraryRootFromConfig ? (
             <Text size="sm" c="dimmed">
-              Set by the BOOKSHELF_LIBRARY_ROOT environment variable.
+              Set by library_root in the config file.
             </Text>
           ) : (
             <Group>

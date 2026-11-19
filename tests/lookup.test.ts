@@ -135,7 +135,7 @@ describe("HTTP client", () => {
       if (String(input).includes("busy") && n === 1) return new Response("", { status: 429, headers: { "retry-after": "2" } });
       return String(input).includes("missing") ? new Response("nope", { status: 404 }) : Response.json({ ok: n });
     }) as typeof fetch;
-    const app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: mkdtempSync(join(tmpdir(), "bookshelf-http-")) }));
+    const app = createApp(loadConfig({ data_dir: mkdtempSync(join(tmpdir(), "bookshelf-http-")) }));
     try {
       const http = new HttpClient(app.db, () => null, { fetchImpl, sleep: async (ms) => void waits.push(ms), minIntervalMs: 500 });
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 });
@@ -164,7 +164,7 @@ describe("lookup service", () => {
     mkdirSync(join(root, "S"), { recursive: true });
     const net = await fakeNetwork();
     calls = net.calls;
-    app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data") }), {
+    app = createApp(loadConfig({ data_dir: join(tmp, "data") }), {
       library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: net.fetchImpl, sleep: noSleep },
     });
@@ -303,7 +303,7 @@ describe("lookup service", () => {
   });
 
   test("network failures are reported, not thrown; bulk counts them", async () => {
-    const failing = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data2") }), {
+    const failing = createApp(loadConfig({ data_dir: join(tmp, "data2") }), {
       library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: (async () => { throw new Error("ENETUNREACH"); }) as unknown as typeof fetch, sleep: noSleep, retries: 1 },
     });

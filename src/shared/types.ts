@@ -10,8 +10,8 @@ export interface ExternalToolsStatus {
 
 export interface SettingsDto {
   libraryRoot: string | null;
-  /** True when BOOKSHELF_LIBRARY_ROOT is set; the root cannot be changed from the UI. */
-  libraryRootFromEnv: boolean;
+  /** True when `library_root` is set in the config file; the root cannot be changed from the UI. */
+  libraryRootFromConfig: boolean;
   contactEmail: string | null;
   dataDir: string;
   tools: ExternalToolsStatus;

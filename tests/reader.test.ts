@@ -25,7 +25,7 @@ beforeAll(async () => {
     makeZip({ "p10.png": await makePng(30, 40), "p2.png": await makePng(20, 30), "ComicInfo.xml": "<ComicInfo/>" }),
   );
   writeFileSync(join(root, "S/Text -- Writer.epub"), "not really an epub");
-  app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data") }));
+  app = createApp(loadConfig({ data_dir: join(tmp, "data") }));
   await app.library.open(root);
   server = Bun.serve({ port: 0, routes: apiRoutes(app) });
 });

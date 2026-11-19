@@ -15,7 +15,7 @@ let dataDir: string;
 const apps: AppContext[] = [];
 
 function newApp(): AppContext {
-  const app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: dataDir }), { library: FAST });
+  const app = createApp(loadConfig({ data_dir: dataDir }), { library: FAST });
   apps.push(app);
   return app;
 }

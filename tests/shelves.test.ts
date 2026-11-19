@@ -19,7 +19,7 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "bookshelf-shelves-"));
   root = join(tmp, "library");
   mkdirSync(root, { recursive: true });
-  app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data") }), { library: FAST });
+  app = createApp(loadConfig({ data_dir: join(tmp, "data") }), { library: FAST });
 });
 
 afterEach(async () => {

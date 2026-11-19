@@ -19,7 +19,7 @@ beforeEach(async () => {
   root = join(tmp, "library");
   mkdirSync(join(root, "Fiction"), { recursive: true });
   mkdirSync(join(root, "Science"), { recursive: true });
-  app = createApp(loadConfig({ BOOKSHELF_DATA_DIR: join(tmp, "data"), BOOKSHELF_MAX_UPLOAD_MB: "1" }), { library: FAST });
+  app = createApp(loadConfig({ data_dir: join(tmp, "data"), max_upload_mb: 1 }), { library: FAST });
   await app.library.open(root);
 });
 
