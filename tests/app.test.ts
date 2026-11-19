@@ -6,6 +6,7 @@ import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import type { ConfigFileSettings } from "../src/server/configFile.ts";
 import { getSettings, prepareConfigLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
+import { health } from "../src/server/api/health.ts";
 import { browseDirectories, makeDirectory } from "../src/server/api/fsBrowse.ts";
 import { ConflictError, NotFoundError } from "../src/server/api/http.ts";
 import { validateShelfName, ValidationError } from "../src/server/library/paths.ts";
@@ -33,6 +34,25 @@ describe("database", () => {
       expect(names).toContain(t);
     }
     expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+  });
+});
+
+describe("health", () => {
+  test("answers 200 while the database works", async () => {
+    const res = health(makeApp());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  test("answers 503 when the database is unavailable", async () => {
+    const app = makeApp();
+    await app.library.close();
+    app.db.close();
+    const res = health(app);
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect((await res.json()).ok).toBe(false);
   });
 });
 

@@ -88,6 +88,9 @@ first start), health-check path, config and env file, and suggested reverse prox
 is the same command (each tool asks with its own name). It reads only the config file, so it works before the service
 has ever run.
 
+The health-check path, `/api/health`, answers `200` while the server and its database work and `503` otherwise; it's
+what ServiceMan polls.
+
 > **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
 > the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`
 > WebSocket).

@@ -2,6 +2,7 @@ import type { AppContext } from "../app.ts";
 import type { ApplyMetadataRequest, BookUpdate, LookupSource, SettingsUpdate } from "../../shared/types.ts";
 import { ValidationError } from "../library/paths.ts";
 import { browseDirectories, makeDirectory } from "./fsBrowse.ts";
+import { health } from "./health.ts";
 import { handle, json, readJson } from "./http.ts";
 import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
@@ -10,7 +11,7 @@ import { pdfjsAssetPath } from "./pdfjsAssets.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
-    "/api/health": { GET: () => json({ ok: true }) },
+    "/api/health": { GET: () => health(app), HEAD: () => health(app) },
     "/api/settings": {
       GET: handle(() => json(getSettings(app))),
       PUT: handle(async (req) => json(updateSettings(app, await readJson<SettingsUpdate>(req)))),
