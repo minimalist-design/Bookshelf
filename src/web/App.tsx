@@ -17,6 +17,7 @@ import { ReviewQueue } from "./pages/ReviewQueue.tsx";
 const Reader = lazy(() => import("./pages/Reader.tsx"));
 import { Settings } from "./pages/Settings.tsx";
 import { Setup } from "./pages/Setup.tsx";
+import { LookupProgress } from "./components/LookupProgress.tsx";
 
 export function App() {
   const settings = useSettings();
@@ -99,6 +100,7 @@ function Shell() {
         </AppShell.Section>
       </AppShell.Navbar>
       <AppShell.Main>
+        <LookupProgress />
         <Routes>
           <Route path="/" element={<Library />} />
           <Route path="/books/:id" element={<BookDetail />} />

@@ -160,8 +160,17 @@ the folder holds other (non-book) files, nothing is changed and you get the list
 
 *Look up* on a book searches by ISBN (Open Library) or DOI (Crossref, then doi.org), else by title/author. Missing
 fields are pre-selected, differing ones need a tick. Bulk lookups (select books → *Actions*) fill the *Review queue*.
-Requests are limited to one per second per service and cached for a week; set a contact email in *Settings* to be
-identified to the services (Crossref's "polite pool").
+
+Requests stay under each service's published rate limit: one at a time per service, about 1 per second (Open Library
+and Crossref allow about 2 per second once you set a contact email in *Settings*, which also puts you in Crossref's
+"polite pool"). A lower limit advertised in Crossref's response headers takes precedence. Responses are cached for a
+week. If a service still answers *429 Too Many Requests*, nothing more is sent to it until its `Retry-After` time (or
+1 minute, doubling while it keeps refusing).
+
+Bulk lookups work through a queue stored in the database, one book at a time, so a large run takes a while and survives
+restarts. A progress bar above every page shows how far it is and roughly how long is left. When a service rate-limits
+the queue, it pauses until the service accepts requests again and then continues, without counting the book as failed.
+You can stop the run at any time, and retry the failed books from the review queue.
 
 ## Data directory
 

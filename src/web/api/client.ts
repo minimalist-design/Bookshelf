@@ -103,6 +103,8 @@ export const api = {
     request<BookActionResult>(`/api/books/${id}/apply-metadata`, { method: "POST", body: JSON.stringify(req) }),
   enqueueLookups: (ids: number[]) => request<LookupQueueStatus>("/api/lookup/bulk", { method: "POST", body: JSON.stringify({ ids }) }),
   lookupStatus: () => request<LookupQueueStatus>("/api/lookup/status"),
+  cancelLookups: () => request<LookupQueueStatus>("/api/lookup/cancel", { method: "POST" }),
+  retryFailedLookups: () => request<LookupQueueStatus>("/api/lookup/retry-failed", { method: "POST" }),
   reviewQueue: () => request<ReviewItemDto[]>("/api/review-queue"),
   skipReview: (id: number) => request<LookupQueueStatus>(`/api/review-queue/${id}`, { method: "DELETE" }),
   acceptFills: () =>

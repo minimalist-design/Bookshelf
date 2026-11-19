@@ -158,6 +158,8 @@ export function apiRoutes(app: AppContext) {
     "/api/lookup/bulk": {
       POST: handle(async (req) => json(app.lookup.enqueue(idList((await readJson<{ ids: unknown }>(req)).ids)), { status: 202 })),
     },
+    "/api/lookup/cancel": { POST: handle(() => json(app.lookup.cancel())) },
+    "/api/lookup/retry-failed": { POST: handle(() => json(app.lookup.retryFailed(), { status: 202 })) },
     "/api/lookup/:id": {
       GET: handle(async (req: Bun.BunRequest<"/api/lookup/:id">) => {
         const p = new URL(req.url).searchParams;

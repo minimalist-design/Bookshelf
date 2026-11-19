@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Alert, Anchor, Button, Center, Group, Loader, Pagination, Paper, Progress, Stack, Text, Title } from "@mantine/core";
+import { Alert, Anchor, Button, Center, Group, Loader, Pagination, Paper, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconChecks } from "@tabler/icons-react";
+import { IconChecks, IconRefresh } from "@tabler/icons-react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { api } from "../api/client.ts";
@@ -36,8 +36,12 @@ export function ReviewQueue() {
     onError: (e) => notifications.show({ color: "red", message: e.message }),
   });
 
+  const retry = useMutation({
+    mutationFn: api.retryFailedLookups,
+    onError: (e) => notifications.show({ color: "red", message: e.message }),
+  });
+
   const s = status.data;
-  const total = s ? s.done + s.pending : 0;
   const identifierMatches = items.filter((i) => i.result.candidates[0] && i.result.candidates[0].match !== "search").length;
 
   return (
@@ -56,20 +60,20 @@ export function ReviewQueue() {
         )}
       </Group>
 
-      {s?.running && (
-        <Paper withBorder p="sm">
-          <Text size="sm" mb={6}>
-            Looking up books… {s.done} of {total}
-            {s.noMatch ? ` · ${s.noMatch} without matches` : ""}
-            {s.failed ? ` · ${s.failed} failed` : ""}
-          </Text>
-          <Progress value={total ? (100 * s.done) / total : 0} animated />
-        </Paper>
-      )}
+      {/* While a run is going, its progress bar is shown above every page. */}
       {!s?.running && s && s.done > 0 && (s.noMatch > 0 || s.failed > 0) && (
         <Alert variant="light" color="gray">
-          Last run: {s.done} looked up{s.noMatch ? `, ${s.noMatch} without any match` : ""}
-          {s.failed ? `, ${s.failed} failed (network or service errors — try again later)` : ""}.
+          <Group justify="space-between" gap="xs">
+            <Text size="sm">
+              Last run: {s.done} looked up{s.noMatch ? `, ${s.noMatch} without any match` : ""}
+              {s.failed ? `, ${s.failed} failed (network or service errors)` : ""}.
+            </Text>
+            {s.failed > 0 && (
+              <Button size="compact-sm" variant="light" leftSection={<IconRefresh size={14} />} loading={retry.isPending} onClick={() => retry.mutate()}>
+                Retry {s.failed} failed
+              </Button>
+            )}
+          </Group>
         </Alert>
       )}
 

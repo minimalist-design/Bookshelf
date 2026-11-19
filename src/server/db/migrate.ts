@@ -2,12 +2,14 @@ import type { Database } from "bun:sqlite";
 import m001 from "./migrations/001_init.sql" with { type: "text" };
 import m002 from "./migrations/002_review_queue.sql" with { type: "text" };
 import m003 from "./migrations/003_edition.sql" with { type: "text" };
+import m004 from "./migrations/004_lookup_jobs.sql" with { type: "text" };
 
 /** Ordered list of migrations; append new ones, never edit applied ones. */
 const MIGRATIONS: readonly { version: number; name: string; sql: string }[] = [
   { version: 1, name: "init", sql: m001 },
   { version: 2, name: "review_queue", sql: m002 },
   { version: 3, name: "edition", sql: m003 },
+  { version: 4, name: "lookup_jobs", sql: m004 },
 ];
 
 export function migrate(db: Database): number {

@@ -9,7 +9,7 @@ import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import { diffMetadata } from "../sources/diff.ts";
 import { lookupDoi, searchCrossref } from "../sources/doi.ts";
-import type { HttpClient } from "../sources/http.ts";
+import { RateLimitedError, type HttpClient } from "../sources/http.ts";
 import { openLibraryByIsbn, openLibraryEditionCovers, openLibrarySearch } from "../sources/openlibrary.ts";
 import type {
   ApplyMetadataRequest,
@@ -46,6 +46,17 @@ export interface LookupOptions {
 }
 
 const COVER_HOSTS = new Set(["covers.openlibrary.org"]);
+/** Service names for the "paused" message. */
+const HOST_NAMES: Record<string, string> = {
+  "openlibrary.org": "Open Library",
+  "covers.openlibrary.org": "Open Library",
+  "api.crossref.org": "Crossref",
+  "doi.org": "doi.org",
+};
+/** Books whose lookup time feeds the time-left estimate. */
+const ETA_WINDOW = 20;
+
+type JobState = "pending" | "done" | "no_match" | "failed";
 /** Works whose editions are listed in the cover picker (one request each, throttled to 1/s). */
 const MAX_EXPANDED_WORKS = 3;
 
@@ -73,11 +84,19 @@ function candidateCover(c: MetadataCandidate): CoverOption {
  * and runs bulk lookups in the background, collecting results in the review queue.
  */
 export class LookupService {
-  private pending: number[] = [];
-  private running = false;
-  private stats = { done: 0, failed: 0, noMatch: 0 };
+  /** The background worker is active (it may be paused or waiting for the library). */
+  private working = false;
+  private stopped = false;
+  private pause: { until: number; by: string } | null = null;
+  private waitingForLibrary = false;
+  private wake: (() => void) | null = null;
+  /** Milliseconds per looked-up book in this run (most recent last). */
+  private durations: number[] = [];
 
-  constructor(private readonly deps: LookupDeps) {}
+  constructor(private readonly deps: LookupDeps) {
+    // Resume a run interrupted by a restart (the worker waits for the library scan).
+    if (this.countPending() > 0) void this.drain();
+  }
 
   private requireVisible(id: number): BookRecord {
     const book = this.deps.library.index.hasBook(id) ? this.deps.books.get(id) : null;
@@ -97,7 +116,12 @@ export class LookupService {
     return { bookId: book.id, candidates: candidates.map((c) => ({ ...c, diff: diffMetadata(book, c.metadata) })), errors };
   }
 
-  private async findCandidates(book: BookRecord, opts: LookupOptions): Promise<{ candidates: MetadataCandidate[]; errors: string[] }> {
+  /** With `rethrowRateLimits`, a rate-limited source aborts the lookup (to be retried later) instead of being reported. */
+  private async findCandidates(
+    book: BookRecord,
+    opts: LookupOptions,
+    rethrowRateLimits = false,
+  ): Promise<{ candidates: MetadataCandidate[]; errors: string[] }> {
     const { http } = this.deps;
     const out: MetadataCandidate[] = [];
     const errors: string[] = [];
@@ -108,6 +132,7 @@ export class LookupService {
         if (Array.isArray(r)) out.push(...r);
         else if (r) out.push(r);
       } catch (err) {
+        if (rethrowRateLimits && err instanceof RateLimitedError) throw err;
         errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
@@ -309,53 +334,162 @@ export class LookupService {
 
   // ---- bulk lookups ------------------------------------------------------------------
 
-  /** Queue books for background lookup; results land in the review queue. */
+  /**
+   * Queue books for background lookup; results land in the review queue. The queue is stored
+   * in the database and worked through one book at a time at the services' allowed pace;
+   * when a service rate-limits us it pauses until the service accepts requests again.
+   */
   enqueue(ids: number[]): LookupQueueStatus {
-    if (!this.running && this.pending.length === 0) this.stats = { done: 0, failed: 0, noMatch: 0 };
-    const known = new Set(this.pending);
-    for (const id of ids) if (!known.has(id) && this.deps.library.index.hasBook(id)) this.pending.push(id), known.add(id);
+    const { db, library } = this.deps;
+    db.transaction(() => {
+      if (this.countPending() === 0) {
+        db.exec("DELETE FROM lookup_jobs"); // previous run is over: start a new one
+        this.durations = [];
+      }
+      const add = db.query(
+        `INSERT INTO lookup_jobs (book_id) VALUES (?)
+         ON CONFLICT(book_id) DO UPDATE SET state = 'pending', error = NULL, finished_at = NULL WHERE state != 'pending'`,
+      );
+      for (const id of new Set(ids)) if (library.index.hasBook(id)) add.run(id);
+    })();
     void this.drain();
+    this.emitStatus();
+    return this.status();
+  }
+
+  /** Drop the books still waiting (the one being looked up finishes). */
+  cancel(): LookupQueueStatus {
+    this.deps.db.query("DELETE FROM lookup_jobs WHERE state = 'pending'").run();
+    this.wake?.();
+    this.emitStatus();
+    return this.status();
+  }
+
+  /** Queue the books of this run whose lookup failed again. */
+  retryFailed(): LookupQueueStatus {
+    this.deps.db.query("UPDATE lookup_jobs SET state = 'pending', error = NULL, finished_at = NULL WHERE state = 'failed'").run();
+    void this.drain();
+    this.emitStatus();
     return this.status();
   }
 
   status(): LookupQueueStatus {
-    return { running: this.running, pending: this.pending.length, ...this.stats, reviewCount: this.reviewCount() };
+    const counts: Record<JobState, number> = { pending: 0, done: 0, no_match: 0, failed: 0 };
+    const rows = this.deps.db.query("SELECT state, COUNT(*) AS n FROM lookup_jobs GROUP BY state").all() as { state: JobState; n: number }[];
+    for (const r of rows) counts[r.state] = r.n;
+    const pending = counts.pending;
+    const pause = this.pause && this.pause.until > Date.now() ? this.pause : null;
+    let etaSeconds: number | null = null;
+    if (pending && this.durations.length) {
+      const avg = this.durations.reduce((a, b) => a + b, 0) / this.durations.length;
+      etaSeconds = Math.round((avg * pending + (pause ? pause.until - Date.now() : 0)) / 1000);
+    }
+    return {
+      running: pending > 0,
+      pending,
+      done: counts.done + counts.no_match + counts.failed,
+      failed: counts.failed,
+      noMatch: counts.no_match,
+      reviewCount: this.reviewCount(),
+      pausedUntil: pause ? new Date(pause.until).toISOString() : null,
+      pausedBy: pause?.by ?? null,
+      waitingForLibrary: pending > 0 && this.waitingForLibrary,
+      etaSeconds,
+    };
   }
 
   /** Waits for the background worker to finish (tests). */
   async idle(): Promise<void> {
-    while (this.running || this.pending.length) await Bun.sleep(20);
+    while (this.working) await Bun.sleep(20);
+  }
+
+  /** Stop the worker (shutdown); pending books stay queued for the next start. */
+  stop(): void {
+    this.stopped = true;
+    this.wake?.();
+  }
+
+  private countPending(): number {
+    return (this.deps.db.query("SELECT COUNT(*) AS n FROM lookup_jobs WHERE state = 'pending'").get() as { n: number }).n;
+  }
+
+  private finish(jobId: number, state: JobState, error: string | null = null): void {
+    this.deps.db
+      .query("UPDATE lookup_jobs SET state = ?, error = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
+      .run(state, error, jobId);
+  }
+
+  /** Sleep that cancel()/stop() can cut short. */
+  private rest(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.wake = null;
+        resolve();
+      };
+      const timer = setTimeout(done, Math.max(0, ms));
+      this.wake = done;
+    });
   }
 
   private async drain(): Promise<void> {
-    if (this.running) return;
-    this.running = true;
-    this.emitStatus();
+    if (this.working || this.stopped) return;
+    this.working = true;
+    const { db, library, books, http } = this.deps;
     try {
-      while (this.pending.length) {
-        const id = this.pending.shift()!;
-        const book = this.deps.library.index.hasBook(id) ? this.deps.books.get(id) : null;
-        if (!book) continue;
-        try {
-          const { candidates, errors } = await this.findCandidates(book, {});
-          if (candidates.length) {
-            this.deps.db
-              .query(
-                `INSERT INTO review_queue (book_id, payload) VALUES (?, ?)
-                 ON CONFLICT(book_id) DO UPDATE SET payload = excluded.payload, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-              )
-              .run(id, JSON.stringify(candidates));
-          } else if (errors.length) this.stats.failed++;
-          else this.stats.noMatch++;
-        } catch {
-          this.stats.failed++;
+      while (!this.stopped) {
+        const job = db.query("SELECT id, book_id FROM lookup_jobs WHERE state = 'pending' ORDER BY id LIMIT 1").get() as
+          | { id: number; book_id: number }
+          | null;
+        if (!job) break;
+
+        const ready = library.status().state === "ready";
+        if (ready !== !this.waitingForLibrary) {
+          this.waitingForLibrary = !ready;
+          this.emitStatus();
         }
-        this.stats.done++;
+        if (!ready) {
+          await this.rest(2000);
+          continue;
+        }
+
+        const book = library.index.hasBook(job.book_id) ? books.get(job.book_id) : null;
+        if (!book) {
+          db.query("DELETE FROM lookup_jobs WHERE id = ?").run(job.id);
+          continue;
+        }
+        const started = Date.now();
+        try {
+          const { candidates, errors } = await http.background(() => this.findCandidates(book, {}, true));
+          if (candidates.length) {
+            db.query(
+              `INSERT INTO review_queue (book_id, payload) VALUES (?, ?)
+               ON CONFLICT(book_id) DO UPDATE SET payload = excluded.payload, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+            ).run(book.id, JSON.stringify(candidates));
+            this.finish(job.id, "done");
+          } else if (errors.length) this.finish(job.id, "failed", errors.join("; "));
+          else this.finish(job.id, "no_match");
+          this.durations = [...this.durations, Date.now() - started].slice(-ETA_WINDOW);
+        } catch (err) {
+          if (err instanceof RateLimitedError) {
+            // Not the book's fault: keep it first in line and wait until the service accepts requests.
+            this.pause = { until: err.retryAt, by: HOST_NAMES[err.host] ?? err.host };
+            console.warn(`Metadata lookups paused until ${new Date(err.retryAt).toISOString()}: ${err.message}`);
+            this.emitStatus();
+            await this.rest(err.retryAt - Date.now());
+            this.pause = null;
+            this.emitStatus();
+            continue;
+          }
+          this.finish(job.id, "failed", err instanceof Error ? err.message : String(err));
+        }
         this.emitStatus();
       }
     } finally {
-      this.running = false;
-      this.emitStatus();
+      this.working = false;
+      this.pause = null;
+      this.waitingForLibrary = false;
+      if (!this.stopped) this.emitStatus();
     }
   }
 

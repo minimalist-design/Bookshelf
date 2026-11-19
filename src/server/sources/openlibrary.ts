@@ -1,7 +1,7 @@
 import { formatEdition } from "../../shared/edition.ts";
 import type { CandidateMetadata, CoverOption, MetadataCandidate } from "../../shared/types.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
-import type { HttpClient } from "./http.ts";
+import { RateLimitedError, type HttpClient } from "./http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate, parseSeries } from "./normalize.ts";
 
 const OL = "https://openlibrary.org";
@@ -62,6 +62,13 @@ interface OlEditionEntry {
 
 export const olCoverUrl = (id: number, size: "S" | "M" | "L" = "L") => `${COVERS}/b/id/${id}-${size}.jpg`;
 
+/** Optional extra record: missing or broken is fine, but a rate limit must reach the caller. */
+const optional = <T>(p: Promise<T | null>): Promise<T | null> =>
+  p.catch((err) => {
+    if (err instanceof RateLimitedError) throw err;
+    return null;
+  });
+
 const text = (v: string | { value?: string } | undefined | null): string | null => {
   const s = typeof v === "string" ? v : v?.value;
   return s?.replace(/\r\n/g, "\n").trim() || null;
@@ -105,7 +112,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
   let workKey: string | null = null;
   let coverUrl = rec.cover?.large ?? null;
   if (editionKey) {
-    const ed = await http.getJson<OlEdition>(`${OL}/books/${editionKey}.json`).catch(() => null);
+    const ed = await optional(http.getJson<OlEdition>(`${OL}/books/${editionKey}.json`));
     if (ed) {
       m.subtitle ??= ed.subtitle?.trim() || null;
       m.edition = ed.edition_name?.replace(/\s+/g, " ").trim() || null;
@@ -119,7 +126,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
     }
   }
   if (workKey && (!m.description || !m.tags.length)) {
-    const work = await http.getJson<OlWork>(`${OL}/works/${workKey}.json`).catch(() => null);
+    const work = await optional(http.getJson<OlWork>(`${OL}/works/${workKey}.json`));
     if (work) {
       m.description ??= cleanDescription(text(work.description));
       if (!m.tags.length) m.tags = cleanSubjects(work.subjects ?? []);

@@ -7,7 +7,7 @@ import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import { lookupDoi } from "../src/server/sources/doi.ts";
-import { HttpClient } from "../src/server/sources/http.ts";
+import { HttpClient, RateLimitedError } from "../src/server/sources/http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate, parseSeries } from "../src/server/sources/normalize.ts";
 import { openLibraryByIsbn, openLibrarySearch } from "../src/server/sources/openlibrary.ts";
 import type { MetadataCandidate } from "../src/shared/types.ts";
@@ -126,10 +126,24 @@ describe("sources (recorded responses)", () => {
   });
 });
 
+/** Clock that only moves when the client sleeps. */
+function fakeClock() {
+  let t = 1_000_000;
+  const waits: number[] = [];
+  return {
+    waits,
+    now: () => t,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+    },
+    advance: (ms: number) => void (t += ms),
+  };
+}
+
 describe("HTTP client", () => {
-  test("caches 200/404 in SQLite, retries 429 honouring Retry-After, throttles per host", async () => {
+  test("caches 200/404 in SQLite, waits out a short Retry-After, paces requests per host", async () => {
     let n = 0;
-    const waits: number[] = [];
     const fetchImpl = (async (input: string | URL | Request) => {
       n++;
       if (String(input).includes("busy") && n === 1) return new Response("", { status: 429, headers: { "retry-after": "2" } });
@@ -137,18 +151,94 @@ describe("HTTP client", () => {
     }) as typeof fetch;
     const app = createApp(loadConfig({ data_dir: mkdtempSync(join(tmpdir(), "bookshelf-http-")) }));
     try {
-      const http = new HttpClient(app.db, () => null, { fetchImpl, sleep: async (ms) => void waits.push(ms), minIntervalMs: 500 });
+      const clock = fakeClock();
+      const http = new HttpClient(app.db, () => null, { fetchImpl, ...clock, minIntervalMs: 500 });
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 });
-      expect(waits).toContain(2000);
+      expect(clock.waits).toContain(2000);
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 }); // cached
       expect(await http.getJson("https://x.test/missing")).toBeNull();
       expect(await http.getJson("https://x.test/missing")).toBeNull();
       expect(n).toBe(3);
-      expect(waits.filter((w) => w === 500).length).toBeGreaterThan(0);
+      expect(clock.waits).toContain(500);
     } finally {
       await app.library.close();
       app.db.close();
     }
+  });
+
+  test("a 429 stops all requests to that host until the cooldown is over; other hosts carry on", async () => {
+    const urls: string[] = [];
+    let limited = true;
+    const fetchImpl = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      if (String(input).includes("a.test") && limited) return new Response("", { status: 429, headers: { "retry-after": "120" } });
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    const clock = fakeClock();
+    const http = new HttpClient(null, () => null, { fetchImpl, ...clock });
+
+    const err = await http.getJson("https://a.test/1").catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).retryAt).toBe(clock.now() + 120_000);
+    expect((err as Error).message).toContain("a.test asked us to slow down; try again in about 2 min");
+    expect(urls).toEqual(["https://a.test/1"]); // no retries into a rate limit
+
+    await expect(http.getJson("https://a.test/2")).rejects.toBeInstanceOf(RateLimitedError);
+    expect(urls).toHaveLength(1); // nothing sent during the cooldown
+    expect(await http.getJson("https://b.test/1")).toEqual({ ok: true });
+    expect(http.cooldowns()).toEqual([{ host: "a.test", until: clock.now() + 120_000 - clock.waits.reduce((x, y) => x + y, 0) }]);
+
+    clock.advance(120_000);
+    limited = false;
+    expect(await http.getJson("https://a.test/3")).toEqual({ ok: true });
+  });
+
+  test("a 429 without Retry-After cools down for 1 min, doubling while it repeats", async () => {
+    let limited = true;
+    const fetchImpl = (async () => (limited ? new Response("", { status: 429 }) : Response.json({}))) as unknown as typeof fetch;
+    const clock = fakeClock();
+    const http = new HttpClient(null, () => null, { fetchImpl, ...clock, maxWaitMs: 0 });
+    const retryIn = async (url: string) => ((await http.getJson(url).catch((e) => e)) as RateLimitedError).retryAt - clock.now();
+    expect(await retryIn("https://a.test/1")).toBe(60_000);
+    clock.advance(60_000);
+    expect(await retryIn("https://a.test/2")).toBe(120_000);
+    clock.advance(120_000);
+    limited = false;
+    await http.getJson("https://a.test/3");
+    limited = true;
+    clock.advance(1000);
+    expect(await retryIn("https://a.test/4")).toBe(60_000); // a success resets the escalation
+  });
+
+  test("known services are paced under their published limits; faster with a contact email; advertised limits win", async () => {
+    const fetchImpl = (async (input: string | URL | Request) =>
+      String(input).includes("crossref")
+        ? Response.json({}, { headers: { "x-rate-limit-limit": "1", "x-rate-limit-interval": "2s" } })
+        : Response.json({})) as typeof fetch;
+    const paceOf = async (email: string | null, host: string) => {
+      const clock = fakeClock();
+      const http = new HttpClient(null, () => email, { fetchImpl, ...clock });
+      await http.getJson(`https://${host}/1`);
+      await http.getJson(`https://${host}/2`);
+      return clock.waits.at(-1);
+    };
+    expect(await paceOf(null, "openlibrary.org")).toBe(1100); // 1 req/s anonymous
+    expect(await paceOf("me@example.org", "openlibrary.org")).toBe(500); // 3 req/s identified
+    expect(await paceOf("me@example.org", "api.crossref.org")).toBe(2200); // header: 1 per 2 s (+10 %)
+  });
+
+  test("one request per host at a time; interactive requests go before queued background ones", async () => {
+    const order: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request) => {
+      order.push(new URL(String(input)).pathname);
+      await Bun.sleep(5);
+      return Response.json({});
+    }) as typeof fetch;
+    const http = new HttpClient(null, () => null, { fetchImpl, ...fakeClock() });
+    const bulk = ["/a", "/b", "/c"].map((p) => http.background(() => http.getJson(`https://x.test${p}`)));
+    const user = http.getJson("https://x.test/user");
+    await Promise.all([...bulk, user]);
+    expect(order).toEqual(["/a", "/user", "/b", "/c"]);
   });
 });
 
@@ -170,6 +260,8 @@ describe("lookup service", () => {
     });
   });
   afterEach(async () => {
+    app.lookup.stop();
+    await app.lookup.idle();
     await app.library.close();
     app.db.close();
     rmSync(tmp, { recursive: true, force: true });
@@ -317,6 +409,9 @@ describe("lookup service", () => {
       failing.lookup.enqueue([id]);
       await failing.lookup.idle();
       expect(failing.lookup.status()).toMatchObject({ failed: 1, reviewCount: 0 });
+      expect(failing.lookup.retryFailed()).toMatchObject({ running: true, pending: 1, failed: 0 });
+      await failing.lookup.idle();
+      expect(failing.lookup.status()).toMatchObject({ running: false, done: 1, failed: 1 });
     } finally {
       await failing.library.close();
       failing.db.close();
@@ -358,5 +453,77 @@ describe("lookup service", () => {
     } finally {
       server.stop(true);
     }
+  });
+
+  test("bulk lookups pause while a service rate-limits us, then resume without counting a failure", async () => {
+    let hits = 0;
+    const net = await fakeNetwork({
+      "openlibrary\\.org/api/books\\?": () =>
+        ++hits === 1 ? new Response("", { status: 429, headers: { "retry-after": "1" } }) : Response.json(JSON.parse(fixture("ol-books-data-9780441172719.json"))),
+    });
+    const limited = createApp(loadConfig({ data_dir: join(tmp, "data3") }), {
+      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
+      http: { fetchImpl: net.fetchImpl, sleep: noSleep, maxWaitMs: 0 },
+    });
+    try {
+      put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+      await limited.library.open(root);
+      const id = limited.library.index.get("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!.bookId;
+      const seen: { pausedBy: string | null; pausedUntil: string | null }[] = [];
+      limited.events.subscribe((e) => e.type === "lookup.status" && seen.push(e.status));
+      limited.lookup.enqueue([id]);
+      await limited.lookup.idle();
+      expect(seen.some((st) => st.pausedBy === "Open Library" && !!st.pausedUntil)).toBe(true);
+      expect(limited.lookup.status()).toMatchObject({ running: false, done: 1, failed: 0, reviewCount: 1, pausedUntil: null });
+    } finally {
+      limited.lookup.stop();
+      await limited.library.close();
+      limited.db.close();
+    }
+  });
+
+  test("cancel drops the waiting books, even during a pause", async () => {
+    const net = await fakeNetwork({ "openlibrary\\.org/": () => new Response("", { status: 429, headers: { "retry-after": "3600" } }) });
+    const limited = createApp(loadConfig({ data_dir: join(tmp, "data4") }), {
+      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
+      http: { fetchImpl: net.fetchImpl, sleep: noSleep, maxWaitMs: 0 },
+    });
+    try {
+      put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+      put("S/Mystery -- Nobody.epub");
+      await limited.library.open(root);
+      const ids = ["S/Dune -- Frank Herbert -- isbn13 9780441172719.epub", "S/Mystery -- Nobody.epub"].map((r) => limited.library.index.get(r)!.bookId);
+      limited.lookup.enqueue(ids);
+      while (!limited.lookup.status().pausedUntil) await Bun.sleep(5);
+      expect(limited.lookup.status()).toMatchObject({ running: true, pending: 2, done: 0 });
+      expect(limited.lookup.cancel()).toMatchObject({ running: false, pending: 0 });
+      await limited.lookup.idle();
+      expect(limited.lookup.status()).toMatchObject({ running: false, pending: 0, done: 0, failed: 0 });
+    } finally {
+      limited.lookup.stop();
+      await limited.library.close();
+      limited.db.close();
+    }
+  });
+
+  test("the queue is kept in the database and resumes after a restart", async () => {
+    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    await app.library.open(root);
+    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    app.lookup.stop(); // as at shutdown: nothing is looked up, the job stays queued
+    app.lookup.enqueue([id]);
+    expect(app.lookup.status()).toMatchObject({ running: true, pending: 1 });
+    await app.library.close();
+    app.db.close();
+
+    const net = await fakeNetwork();
+    app = createApp(loadConfig({ data_dir: join(tmp, "data") }), {
+      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
+      http: { fetchImpl: net.fetchImpl, sleep: noSleep },
+    });
+    expect(app.lookup.status()).toMatchObject({ running: true, pending: 1 });
+    await app.library.open(root);
+    await app.lookup.idle();
+    expect(app.lookup.status()).toMatchObject({ running: false, done: 1, reviewCount: 1 });
   });
 });

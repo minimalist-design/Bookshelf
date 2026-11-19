@@ -392,6 +392,13 @@ export interface LookupQueueStatus {
   noMatch: number;
   /** Items waiting in the review queue. */
   reviewCount: number;
+  /** While a service is rate-limiting us: when the queue resumes (ISO time) and which service. */
+  pausedUntil: string | null;
+  pausedBy: string | null;
+  /** The queue waits for the library to finish scanning (or to become available). */
+  waitingForLibrary: boolean;
+  /** Rough time left for the pending books, from the pace of this run; null until known. */
+  etaSeconds: number | null;
 }
 
 // ---- Maintenance ----------------------------------------------------------------

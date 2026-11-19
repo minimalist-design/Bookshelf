@@ -30,7 +30,7 @@ export function SelectionBar({ selection, onClear }: Props) {
     onSuccess: (st) => {
       notifications.show({
         title: `Looking up ${ids.length} book${ids.length === 1 ? "" : "s"}`,
-        message: `Results appear in the review queue (${st.pending} waiting). Nothing changes until you apply them.`,
+        message: `They're looked up one at a time at the pace the metadata services allow (${st.pending} waiting). Results appear in the review queue; nothing changes until you apply them.`,
       });
       onClear();
       navigate("/review");

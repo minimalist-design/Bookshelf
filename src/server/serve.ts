@@ -69,6 +69,7 @@ console.log(`Library root: ${root ?? "(not configured — open the web UI to cho
 app.library.open(root).catch((err) => console.error("Library scan failed:", err));
 
 const shutdown = async () => {
+  app.lookup.stop(); // queued lookups resume on the next start
   await app.library.close();
   app.db.close();
   process.exit(0);

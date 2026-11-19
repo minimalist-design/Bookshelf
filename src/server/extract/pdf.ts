@@ -1,3 +1,5 @@
+// Must stay the first import: it silences pdf.js's canvas polyfill warnings while pdf.js loads.
+import { restoreConsoleWarn } from "./pdfjsNodeWarnings.ts";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 // @ts-expect-error -- the worker module ships without type declarations
 import * as pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs";
@@ -7,6 +9,9 @@ import { normalizeIsbn } from "../naming/isbn.ts";
 import { cover } from "./images.ts";
 import { run } from "./subprocess.ts";
 import { htmlToText, normalizeDate } from "./text.ts";
+
+// Every import has been evaluated by now, pdf.js included: later warnings go through unfiltered.
+restoreConsoleWarn();
 
 // Outside a browser pdf.js runs its worker in-process, loading it with a runtime `import("./pdf.worker.mjs")`
 // unless the module is already registered here. Registering it statically lets the bundler include it, which the

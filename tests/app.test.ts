@@ -30,10 +30,10 @@ describe("database", () => {
     const app = makeApp();
     const tables = app.db.query("SELECT name FROM sqlite_master WHERE type IN ('table')").all() as { name: string }[];
     const names = tables.map((t) => t.name);
-    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache"]) {
+    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "lookup_jobs"]) {
       expect(names).toContain(t);
     }
-    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
   });
 });
 

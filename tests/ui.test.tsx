@@ -69,7 +69,10 @@ const facets: LibraryFacets = {
   publishers: [{ name: "Ace", count: 1 }],
 };
 
-const lookupStatus: LookupQueueStatus = { running: true, pending: 3, done: 2, failed: 0, noMatch: 1, reviewCount: 1 };
+const lookupStatus: LookupQueueStatus = {
+  running: true, pending: 3, done: 2, failed: 0, noMatch: 1, reviewCount: 1,
+  pausedUntil: "2026-01-01T12:30:00Z", pausedBy: "Open Library", waitingForLibrary: false, etaSeconds: 150,
+};
 const review: ReviewItemDto[] = [
   {
     book,
@@ -156,6 +159,12 @@ describe("UI render smoke", () => {
     expect(html).toContain("Frank Herbert");
     expect(html).toContain("Add books");
     expect(html).toContain("Fiction");
+    // Bulk lookup progress is shown on every page, with the rate-limit pause and time left.
+    expect(html).toContain("Looking up metadata: 2 of 5");
+    expect(html).toContain("1 without matches");
+    expect(html).toContain("Open Library asked us to slow down");
+    expect(html).toContain("about 3 min left");
+    expect(html).toContain("Review 1");
   });
 
   test("library with filters from the URL", () => {
@@ -178,7 +187,7 @@ describe("UI render smoke", () => {
   test("review queue with candidate comparison", () => {
     const html = render("/review", baseQuery, page);
     expect(html).toContain("Review queue");
-    expect(html).toContain("Looking up books… 2 of 5");
+    expect(html).toContain("Looking up metadata: 2 of 5");
     expect(html).toContain("ISBN match");
     expect(html).toContain("Ace Books");
     expect(html).toContain("896");
