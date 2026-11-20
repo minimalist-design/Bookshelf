@@ -1,10 +1,11 @@
 import type { BooksRepo } from "../db/repo/books.ts";
 import type { HashCacheRepo } from "../db/repo/hashCache.ts";
 import type { Extractor } from "../extract/index.ts";
+import { applyRules } from "../metadata/rules.ts";
 import { FORMAT_METADATA_RANK, fillMetadata, mergeMetadata, type MergeResult } from "../extract/merge.ts";
-import type { BookMetadata, RawMetadata } from "../metadata/types.ts";
+import { pickMetadata, type BookMetadata, type RawMetadata } from "../metadata/types.ts";
 import type { BookFormat, DetectedFormat } from "../naming/formats.ts";
-import { parseFilename } from "../naming/parseFilename.ts";
+import { parseFilename, type ParsedFilename } from "../naming/parseFilename.ts";
 import { hashFile } from "./hasher.ts";
 import { shelfOf, type IndexedFile, type LibraryIndex } from "./libraryIndex.ts";
 
@@ -48,6 +49,10 @@ export interface LinkerDeps {
    * identifier), with the embedded metadata that was read from it (e.g. to store its cover).
    */
   onLinkedNew?: (bookId: number, info: LinkedNewInfo, embedded: RawMetadata, file: FileToLink) => Promise<void> | void;
+  /** Rewrites names read from files to their remembered main spelling (aliases). */
+  canonicalize?: (m: BookMetadata) => BookMetadata;
+  /** Whether a name is already an author in the library (tells titles from names in filenames). */
+  isKnownAuthor?: (name: string) => boolean;
 }
 
 /**
@@ -67,6 +72,19 @@ export class Linker {
     const run = this.queue.then(fn, fn);
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /** A filename read with the library's authors as a hint to which part is the author. */
+  parse(filename: string): ParsedFilename {
+    return parseFilename(filename, { isKnownAuthor: this.deps.isKnownAuthor });
+  }
+
+  /** Metadata of a file (embedded, else from its name), reorganized by the metadata rules, with remembered aliases applied. */
+  merge(embedded: RawMetadata, parsed: ParsedFilename, fileStem: string): MergeResult {
+    const merged = mergeMetadata(embedded, parsed, fileStem, { isKnownAuthor: this.deps.isKnownAuthor });
+    const ruled = applyRules(merged.metadata);
+    const canonical = this.deps.canonicalize?.(ruled) ?? ruled;
+    return canonical === merged.metadata ? merged : { ...merged, metadata: canonical };
   }
 
   async hashOf(file: FileToLink): Promise<string> {
@@ -91,14 +109,14 @@ export class Linker {
     if (known) return { file: known, outcome: "hash" };
 
     // Unknown content: read metadata outside the lock (slow I/O), decide inside it.
-    const parsed = parseFilename(file.rel.slice(file.rel.lastIndexOf("/") + 1));
+    const parsed = this.parse(file.rel.slice(file.rel.lastIndexOf("/") + 1));
     let embedded: RawMetadata = {};
     try {
       embedded = await this.deps.extract(file.abs, file.detected.format);
     } catch (err) {
       console.warn(`Metadata extraction failed for ${file.rel}:`, err);
     }
-    const merged = mergeMetadata(embedded, parsed, file.detected.stem);
+    const merged = this.merge(embedded, parsed, file.detected.stem);
 
     let preferred = true;
     const result = await this.exclusive(() => {
@@ -177,24 +195,4 @@ export class Linker {
     this.deps.index.set(indexed);
     return indexed;
   }
-}
-
-function pickMetadata(m: BookMetadata): BookMetadata {
-  return {
-    title: m.title,
-    subtitle: m.subtitle,
-    authors: m.authors,
-    isbn13: m.isbn13,
-    doi: m.doi,
-    publisher: m.publisher,
-    edition: m.edition,
-    publishedDate: m.publishedDate,
-    year: m.year,
-    language: m.language,
-    pages: m.pages,
-    description: m.description,
-    series: m.series,
-    seriesIndex: m.seriesIndex,
-    tags: m.tags,
-  };
 }

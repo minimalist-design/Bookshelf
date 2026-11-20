@@ -21,7 +21,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client.ts";
 import { useInvalidateBooks, useLibraryStatus, useShelves } from "../../api/hooks.ts";
 
-const SOURCE = { openlibrary: "Open Library", doi: "DOI", manual: "Edited" } as const;
+const SOURCE = { isbndb: "ISBNdb", openlibrary: "Open Library", doi: "DOI", manual: "Edited" } as const;
 
 function bytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
@@ -57,6 +57,14 @@ export function MaintenancePanel() {
     onSuccess: (r) => {
       invalidate();
       notifications.show({ color: "teal", message: `Removed ${plural(r.removedBooks, "unconfirmed entry", "unconfirmed entries")} and ${plural(r.removedCoverFiles, "unused cover file")}` });
+    },
+    onError,
+  });
+  const applyRules = useMutation({
+    mutationFn: api.applyMetadataRules,
+    onSuccess: (r) => {
+      invalidate();
+      notifications.show({ color: "teal", message: r.changed ? `Reorganized the metadata of ${plural(r.changed, "book")}` : "No book needed changes" });
     },
     onError,
   });
@@ -123,6 +131,8 @@ export function MaintenancePanel() {
               <Stat label="Database" value={bytes(s.databaseBytes)} />
               <Stat label="Lookup cache" value={s.httpCacheEntries} />
               <Stat label="Review queue" value={s.reviewQueue} />
+              <Stat label="ISBNdb records kept" value={s.isbndbRecords} />
+              <Stat label="ISBNdb covers kept" value={`${s.isbndbCovers} · ${bytes(s.isbndbCoverBytes)}`} />
             </SimpleGrid>
           )}
         </Stack>
@@ -210,6 +220,20 @@ export function MaintenancePanel() {
             </div>
             <Button size="xs" variant="light" leftSection={<IconEraser size={14} />} loading={cleanup.isPending} onClick={() => cleanup.mutate()}>
               Clean up
+            </Button>
+          </Group>
+          <Group justify="space-between" wrap="nowrap" align="flex-start">
+            <div>
+              <Text size="sm" fw={500}>
+                Apply metadata rules
+              </Text>
+              <Text size="xs" c="dimmed">
+                Reorganizes unconfirmed metadata with the built-in rules (e.g. Delphi Classics parts editions become a series).
+                New imports get them automatically; confirmed metadata is left alone.
+              </Text>
+            </div>
+            <Button size="xs" variant="light" loading={applyRules.isPending} onClick={() => applyRules.mutate()}>
+              Apply
             </Button>
           </Group>
           <Group justify="space-between" wrap="nowrap" align="flex-start">

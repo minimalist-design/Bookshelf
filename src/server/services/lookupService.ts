@@ -7,9 +7,14 @@ import { ValidationError } from "../library/paths.ts";
 import { toSummary } from "../library/queries.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
+import { applyRules } from "../metadata/rules.ts";
 import { diffMetadata } from "../sources/diff.ts";
 import { lookupDoi, searchCrossref } from "../sources/doi.ts";
-import { RateLimitedError, type HttpClient } from "../sources/http.ts";
+import type { IsbndbConfig } from "../config.ts";
+import { QuotaExceededError, RateLimitedError, serviceName, type HttpClient } from "../sources/http.ts";
+import type { IsbndbRecordsRepo } from "../db/repo/isbndbRecords.ts";
+import { isbndbByIsbn, isbndbKeptSearch, isbndbKeyInfo, isbndbSearch, keptByIsbn } from "../sources/isbndb.ts";
+import type { IsbndbCoverDownloader } from "./isbndbCovers.ts";
 import { openLibraryByIsbn, openLibraryEditionCovers, openLibrarySearch } from "../sources/openlibrary.ts";
 import type {
   ApplyMetadataRequest,
@@ -17,6 +22,9 @@ import type {
   BookUpdate,
   CoverOption,
   CoverSearchResult,
+  IsbndbKeyDto,
+  LookupJobDto,
+  LookupJobState as JobState,
   LookupQueueStatus,
   LookupResult,
   LookupSource,
@@ -25,7 +33,11 @@ import type {
   ReviewItemDto,
 } from "../../shared/types.ts";
 import { METADATA_FIELDS } from "../../shared/types.ts";
+
+/** Fields that can be typed in while reviewing a lookup: the metadata, plus the book's own notes. */
+const EDITABLE_FIELDS = [...METADATA_FIELDS, "notes"] as const;
 import { NotFoundError } from "../api/http.ts";
+import type { AliasesRepo } from "../db/repo/aliases.ts";
 import type { BookService } from "./bookService.ts";
 
 export interface LookupDeps {
@@ -33,9 +45,17 @@ export interface LookupDeps {
   http: HttpClient;
   library: Library;
   books: BooksRepo;
+  /** Candidates use the remembered main spelling of names, like imports do. */
+  aliases: AliasesRepo;
   bookService: BookService;
   covers: CoverStore;
   events: EventBus;
+  /** ISBNdb: its API is asked only when picked by name (its calls are paid); its kept records answer automatic lookups. */
+  isbndb: IsbndbConfig;
+  /** Every record ISBNdb has sent, kept for good; read before asking ISBNdb. */
+  isbndbRecords: IsbndbRecordsRepo;
+  /** Their cover images, downloaded in the background. */
+  isbndbCovers: IsbndbCoverDownloader;
 }
 
 export interface LookupOptions {
@@ -45,18 +65,11 @@ export interface LookupOptions {
   q?: string;
 }
 
-const COVER_HOSTS = new Set(["covers.openlibrary.org"]);
-/** Service names for the "paused" message. */
-const HOST_NAMES: Record<string, string> = {
-  "openlibrary.org": "Open Library",
-  "covers.openlibrary.org": "Open Library",
-  "api.crossref.org": "Crossref",
-  "doi.org": "doi.org",
-};
+const COVER_HOSTS = new Set(["covers.openlibrary.org", "images.isbndb.com"]);
 /** Books whose lookup time feeds the time-left estimate. */
 const ETA_WINDOW = 20;
-
-type JobState = "pending" | "done" | "no_match" | "failed";
+/** Finished jobs of earlier runs are kept this long (the Add books page reads their outcome). */
+const OLD_JOB_RETENTION = "-1 day";
 /** Works whose editions are listed in the cover picker (one request each, throttled to 1/s). */
 const MAX_EXPANDED_WORKS = 3;
 
@@ -79,9 +92,10 @@ function candidateCover(c: MetadataCandidate): CoverOption {
 }
 
 /**
- * Finds metadata candidates in Open Library (ISBN, title/author) and the DOI registries
- * (Crossref, doi.org), applies the fields the user accepts (which confirms the book),
- * and runs bulk lookups in the background, collecting results in the review queue.
+ * Finds metadata candidates in the kept ISBNdb records (its API only when ISBNdb is picked by
+ * name), else Open Library (ISBN, title/author), and the DOI registries (Crossref, doi.org);
+ * applies the fields the user accepts (which confirms the book), and runs bulk lookups in the
+ * background, collecting results in the review queue. Bulk lookups never call ISBNdb.
  */
 export class LookupService {
   /** The background worker is active (it may be paused or waiting for the library). */
@@ -89,6 +103,7 @@ export class LookupService {
   private stopped = false;
   private pause: { until: number; by: string } | null = null;
   private waitingForLibrary = false;
+  private currentBookId: number | null = null;
   private wake: (() => void) | null = null;
   /** Milliseconds per looked-up book in this run (most recent last). */
   private durations: number[] = [];
@@ -113,7 +128,8 @@ export class LookupService {
   }
 
   private withDiffs(book: BookRecord, candidates: MetadataCandidate[], errors: string[] = []): LookupResult {
-    return { bookId: book.id, candidates: candidates.map((c) => ({ ...c, diff: diffMetadata(book, c.metadata) })), errors };
+    const canonical = candidates.map((c) => ({ ...c, metadata: this.deps.aliases.apply(applyRules(c.metadata)) }));
+    return { bookId: book.id, notes: book.notes, candidates: canonical.map((c) => ({ ...c, diff: diffMetadata(book, c.metadata) })), errors };
   }
 
   /** With `rethrowRateLimits`, a rate-limited source aborts the lookup (to be retried later) instead of being reported. */
@@ -123,9 +139,16 @@ export class LookupService {
     rethrowRateLimits = false,
   ): Promise<{ candidates: MetadataCandidate[]; errors: string[] }> {
     const { http } = this.deps;
+    const key = this.deps.isbndb.apiKey;
     const out: MetadataCandidate[] = [];
     const errors: string[] = [];
     const wants = (s: LookupSource) => !opts.source || opts.source === s;
+    if (opts.source === "isbndb" && !key) throw new ValidationError("ISBNdb has no API key: set ISBNDB_API_KEY in the env file");
+    const store = this.deps.isbndbRecords;
+    // Only ISBNdb picked by name calls its API (fresh, even for a kept record); otherwise the kept
+    // records answer first (even without a key), at no cost.
+    const fresh = opts.source === "isbndb";
+    const useIsbndb = !!key && fresh;
     const attempt = async (label: string, fn: () => Promise<MetadataCandidate | MetadataCandidate[] | null>) => {
       try {
         const r = await fn();
@@ -133,6 +156,8 @@ export class LookupService {
         else if (r) out.push(r);
       } catch (err) {
         if (rethrowRateLimits && err instanceof RateLimitedError) throw err;
+        // A used-up daily quota isn't the book's fault: in bulk runs the other sources simply take over.
+        if (rethrowRateLimits && err instanceof QuotaExceededError) return;
         errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
       }
     };
@@ -140,14 +165,20 @@ export class LookupService {
     const q = opts.q?.trim();
     const isbn = q ? normalizeIsbn(q) : book.isbn13;
     const doi = q ? normalizeDoi(q) : book.doi;
-    if (isbn && wants("openlibrary")) await attempt("Open Library", () => openLibraryByIsbn(http, isbn));
+    // ISBNdb first (kept records, or its API when picked); Open Library when it has nothing.
+    if (isbn && useIsbndb) await attempt("ISBNdb", () => isbndbByIsbn(http, key!, store, isbn, fresh));
+    else if (isbn && wants("isbndb")) await attempt("ISBNdb records", async () => keptByIsbn(store, isbn));
+    if (isbn && !out.length && wants("openlibrary")) await attempt("Open Library", () => openLibraryByIsbn(http, isbn));
     if (doi && wants("doi")) await attempt("DOI", () => lookupDoi(http, doi));
 
     // Typed identifiers are exact: no fallback search. Otherwise search when identifiers found nothing.
     const typedId = !!q && (!!normalizeIsbn(q) || !!normalizeDoi(q));
     if (out.length === 0 && !typedId) {
       const query = q ? { q } : { title: book.title, author: book.authors[0] ?? null };
-      if (wants("openlibrary")) await attempt("Open Library search", () => openLibrarySearch(http, query));
+      const kept = fresh || !wants("isbndb") ? null : isbndbKeptSearch(store, query);
+      if (kept?.sure || (kept && !useIsbndb)) out.push(...kept.candidates);
+      else if (useIsbndb) await attempt("ISBNdb search", () => isbndbSearch(http, key!, store, query, 8, fresh));
+      if (!out.length && wants("openlibrary")) await attempt("Open Library search", () => openLibrarySearch(http, query));
       // Papers and DOI books live in Crossref; skip it for plain book searches when the user picked OL.
       if (wants("doi")) await attempt("Crossref search", () => searchCrossref(http, query));
     }
@@ -160,19 +191,26 @@ export class LookupService {
   async apply(bookId: number, req: ApplyMetadataRequest): Promise<BookActionResult> {
     this.requireVisible(bookId);
     const c = req?.candidate;
-    if (!c || (c.source !== "openlibrary" && c.source !== "doi") || !c.metadata) throw new ValidationError("Invalid candidate");
+    if (!c || (c.source !== "isbndb" && c.source !== "openlibrary" && c.source !== "doi") || !c.metadata) throw new ValidationError("Invalid candidate");
     const fields = (req.fields ?? []).filter((f): f is MetadataField => (METADATA_FIELDS as readonly string[]).includes(f));
 
-    const patch: BookUpdate = {};
-    for (const f of fields) {
-      const v = c.metadata[f];
-      const empty = v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
-      if (!empty) (patch as Record<string, unknown>)[f] = v; // accepting never clears a field
-    }
+    // Hand edits first, so a field also chosen from the candidate takes the candidate's value.
+    const edits = Object.fromEntries(
+      Object.entries(req.edits ?? {}).filter(([f, v]) => (EDITABLE_FIELDS as readonly string[]).includes(f) && v !== undefined),
+    ) as BookUpdate;
+    const fromCandidate = Object.fromEntries(
+      fields
+        .map((f) => [f, c.metadata[f]] as const)
+        // accepting never clears a field
+        .filter(([, v]) => !(v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0))),
+    ) as BookUpdate;
+    const patch: BookUpdate = { ...edits, ...fromCandidate };
     if (patch.series === undefined && patch.seriesIndex !== undefined && !this.deps.books.get(bookId)?.series) delete patch.seriesIndex;
 
-    // Fetch the cover before touching anything, so a failed download doesn't half-apply.
-    const cover = req.cover && c.coverUrl ? await this.downloadCover(c.coverUrl) : null;
+    // Fetch the cover before touching anything, so a failed download doesn't half-apply. An ISBNdb
+    // cover already downloaded with its record is taken from disk.
+    const keptCover = req.cover && c.source === "isbndb" ? this.deps.isbndbCovers.read(c.id) : null;
+    const cover = keptCover ?? (req.cover && c.coverUrl ? await this.downloadCover(c.coverUrl) : null);
 
     const result = await this.deps.bookService.update(bookId, patch, {
       confirm: c.source,
@@ -180,7 +218,7 @@ export class LookupService {
       ...(c.source === "openlibrary" && c.match === "search" ? { olWorkKey: c.olWorkKey } : {}),
     });
     if (cover && (await this.deps.covers.save(bookId, { data: cover, mime: "image/jpeg" }))) {
-      this.deps.books.setHasCover(bookId, true, "openlibrary");
+      this.deps.books.setHasCover(bookId, true, c.source);
       result.book = { ...result.book, hasCover: true };
     }
     this.removeFromQueue(bookId);
@@ -188,7 +226,7 @@ export class LookupService {
     return result;
   }
 
-  /** Only Open Library covers are fetched; `default=false` makes a missing image a 404 instead of a blank. */
+  /** Only Open Library and ISBNdb covers are fetched; for Open Library, `default=false` makes a missing image a 404 instead of a blank. */
   private async downloadCover(coverUrl: string): Promise<Uint8Array | null> {
     let url: URL;
     try {
@@ -197,7 +235,7 @@ export class LookupService {
       throw new ValidationError("Cover URL not allowed");
     }
     if (url.protocol !== "https:" || !COVER_HOSTS.has(url.host)) throw new ValidationError("Cover URL not allowed");
-    url.searchParams.set("default", "false");
+    if (url.host === "covers.openlibrary.org") url.searchParams.set("default", "false");
     return this.deps.http.getBytes(url.toString());
   }
 
@@ -342,15 +380,20 @@ export class LookupService {
   enqueue(ids: number[]): LookupQueueStatus {
     const { db, library } = this.deps;
     db.transaction(() => {
+      let run = this.currentRun();
       if (this.countPending() === 0) {
-        db.exec("DELETE FROM lookup_jobs"); // previous run is over: start a new one
+        // The previous run is over: start a new one (its jobs stay readable for a day).
+        run++;
+        db.query(`DELETE FROM lookup_jobs WHERE state != 'pending' AND finished_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '${OLD_JOB_RETENTION}')`).run();
         this.durations = [];
       }
       const add = db.query(
-        `INSERT INTO lookup_jobs (book_id) VALUES (?)
-         ON CONFLICT(book_id) DO UPDATE SET state = 'pending', error = NULL, finished_at = NULL WHERE state != 'pending'`,
+        `INSERT INTO lookup_jobs (book_id, run) VALUES (?, ?)
+         ON CONFLICT(book_id) DO UPDATE SET state = 'pending', error = NULL, finished_at = NULL, run = excluded.run,
+           id = (SELECT MAX(id) + 1 FROM lookup_jobs)
+         WHERE state != 'pending'`,
       );
-      for (const id of new Set(ids)) if (library.index.hasBook(id)) add.run(id);
+      for (const id of new Set(ids)) if (library.index.hasBook(id)) add.run(id, run);
     })();
     void this.drain();
     this.emitStatus();
@@ -367,7 +410,9 @@ export class LookupService {
 
   /** Queue the books of this run whose lookup failed again. */
   retryFailed(): LookupQueueStatus {
-    this.deps.db.query("UPDATE lookup_jobs SET state = 'pending', error = NULL, finished_at = NULL WHERE state = 'failed'").run();
+    this.deps.db
+      .query("UPDATE lookup_jobs SET state = 'pending', error = NULL, finished_at = NULL WHERE state = 'failed' AND run = ?")
+      .run(this.currentRun());
     void this.drain();
     this.emitStatus();
     return this.status();
@@ -375,7 +420,9 @@ export class LookupService {
 
   status(): LookupQueueStatus {
     const counts: Record<JobState, number> = { pending: 0, done: 0, no_match: 0, failed: 0 };
-    const rows = this.deps.db.query("SELECT state, COUNT(*) AS n FROM lookup_jobs GROUP BY state").all() as { state: JobState; n: number }[];
+    const rows = this.deps.db
+      .query("SELECT state, COUNT(*) AS n FROM lookup_jobs WHERE run = ? OR state = 'pending' GROUP BY state")
+      .all(this.currentRun()) as { state: JobState; n: number }[];
     for (const r of rows) counts[r.state] = r.n;
     const pending = counts.pending;
     const pause = this.pause && this.pause.until > Date.now() ? this.pause : null;
@@ -395,7 +442,28 @@ export class LookupService {
       pausedBy: pause?.by ?? null,
       waitingForLibrary: pending > 0 && this.waitingForLibrary,
       etaSeconds,
+      currentBookId: pending > 0 ? this.currentBookId : null,
     };
+  }
+
+  /** The lookup job of each book (null: none, e.g. never queued or cancelled). */
+  jobs(ids: number[]): Record<number, LookupJobDto | null> {
+    const out: Record<number, LookupJobDto | null> = {};
+    for (const id of ids) out[id] = null;
+    if (!ids.length) return out;
+    const rows = this.deps.db
+      .query(
+        `SELECT j.book_id, j.state, j.error,
+           CASE WHEN j.state = 'pending' THEN (SELECT COUNT(*) FROM lookup_jobs p WHERE p.state = 'pending' AND p.id < j.id) ELSE 0 END AS position
+         FROM lookup_jobs j WHERE j.book_id IN (SELECT value FROM json_each(?))`,
+      )
+      .all(JSON.stringify(ids)) as { book_id: number; state: JobState; error: string | null; position: number }[];
+    for (const r of rows) out[r.book_id] = { state: r.state, position: r.position, error: r.error };
+    return out;
+  }
+
+  private currentRun(): number {
+    return (this.deps.db.query("SELECT COALESCE(MAX(run), 0) AS run FROM lookup_jobs").get() as { run: number }).run;
   }
 
   /** Waits for the background worker to finish (tests). */
@@ -459,6 +527,8 @@ export class LookupService {
           continue;
         }
         const started = Date.now();
+        this.currentBookId = book.id;
+        this.emitStatus();
         try {
           const { candidates, errors } = await http.background(() => this.findCandidates(book, {}, true));
           if (candidates.length) {
@@ -473,7 +543,7 @@ export class LookupService {
         } catch (err) {
           if (err instanceof RateLimitedError) {
             // Not the book's fault: keep it first in line and wait until the service accepts requests.
-            this.pause = { until: err.retryAt, by: HOST_NAMES[err.host] ?? err.host };
+            this.pause = { until: err.retryAt, by: serviceName(err.host) };
             console.warn(`Metadata lookups paused until ${new Date(err.retryAt).toISOString()}: ${err.message}`);
             this.emitStatus();
             await this.rest(err.retryAt - Date.now());
@@ -482,6 +552,8 @@ export class LookupService {
             continue;
           }
           this.finish(job.id, "failed", err instanceof Error ? err.message : String(err));
+        } finally {
+          this.currentBookId = null;
         }
         this.emitStatus();
       }
@@ -489,8 +561,15 @@ export class LookupService {
       this.working = false;
       this.pause = null;
       this.waitingForLibrary = false;
+      this.currentBookId = null;
       if (!this.stopped) this.emitStatus();
     }
+  }
+
+  /** The plan behind the ISBNdb key and today's quota (free: not charged); null without a key. */
+  async isbndbKey(): Promise<IsbndbKeyDto | null> {
+    const key = this.deps.isbndb.apiKey;
+    return key ? isbndbKeyInfo(this.deps.http, key) : null;
   }
 
   private emitStatus(): void {

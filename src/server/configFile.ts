@@ -26,6 +26,12 @@ export interface ConfigFileSettings {
   /** 0: not assigned yet; the first start picks a free one in 20000–20999 and writes it here. */
   port?: number;
   max_upload_mb?: number;
+  /** ISBNdb calls allowed per day (the plan's daily quota; each ISBN in a bulk call counts as one). */
+  isbndb_daily_limit?: number;
+  /** ISBNdb requests per second (the plan's rate limit). */
+  isbndb_per_second?: number;
+  /** Most ISBNs in one ISBNdb bulk call (the plan's bulk limit). */
+  isbndb_bulk_size?: number;
 }
 
 const TYPES: Record<keyof ConfigFileSettings, "string" | "number"> = {
@@ -35,6 +41,9 @@ const TYPES: Record<keyof ConfigFileSettings, "string" | "number"> = {
   host: "string",
   port: "number",
   max_upload_mb: "number",
+  isbndb_daily_limit: "number",
+  isbndb_per_second: "number",
+  isbndb_bulk_size: "number",
 };
 
 export class ConfigError extends Error {}

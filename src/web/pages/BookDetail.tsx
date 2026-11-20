@@ -6,6 +6,7 @@ import {
   Badge,
   Button,
   Center,
+  CloseButton,
   Grid,
   Group,
   Loader,
@@ -55,9 +56,9 @@ import { DeleteBooksModal } from "../components/book/DeleteBooksModal.tsx";
 import { ConfirmedMark } from "../components/library/BookCards.tsx";
 import { MoveToSubmenu } from "../components/library/MoveToMenu.tsx";
 import { useBookActions } from "../components/library/useBookActions.ts";
-import { returnUrl } from "../components/library/returnTo.ts";
+import { returnState as toReturnState, returnUrl } from "../components/library/returnTo.ts";
 
-const CONFIRMED_LABEL = { openlibrary: "Confirmed · Open Library", doi: "Confirmed · DOI", manual: "Confirmed · edited" } as const;
+const CONFIRMED_LABEL = { isbndb: "Confirmed · ISBNdb", openlibrary: "Confirmed · Open Library", doi: "Confirmed · DOI", manual: "Confirmed · edited" } as const;
 const SOURCE_LABEL = { embedded: "From the file's metadata", filename: "From the filename", mixed: "From file metadata and filename" } as const;
 
 function formatSize(bytes: number): string {
@@ -67,7 +68,14 @@ function formatSize(bytes: number): string {
 }
 
 export function BookDetail() {
-  const id = Number(useParams().id);
+  return <BookPage id={Number(useParams().id)} />;
+}
+
+/**
+ * A book's page. With `onClose` it's shown in an overlay on top of another page (the review
+ * queue): no Back button, and deleting the book closes the overlay instead of leaving the page.
+ */
+export function BookPage({ id, onClose }: { id: number; onClose?: () => void }) {
   const book = useBook(Number.isFinite(id) ? id : null);
 
   if (book.isLoading) {
@@ -83,19 +91,25 @@ export function BookDetail() {
         <Alert color="yellow" title="Book not found">
           It may have been removed from the library directory.
         </Alert>
-        <Button variant="default" component={Link} to="/" leftSection={<IconArrowLeft size={16} />}>
-          Back
-        </Button>
+        {!onClose && (
+          <Button variant="default" component={Link} to="/" leftSection={<IconArrowLeft size={16} />}>
+            Back
+          </Button>
+        )}
       </Stack>
     );
   }
-  return <BookView book={book.data} />;
+  return <BookView book={book.data} onClose={onClose} />;
 }
 
-function BookView({ book }: { book: BookDetailDto }) {
+function BookView({ book, onClose }: { book: BookDetailDto; onClose?: () => void }) {
   const navigate = useNavigate();
-  // Router state set by the library link that opened this book; carried through the reader.
-  const returnState = useLocation().state;
+  const location = useLocation();
+  // Router state set by the link that opened this book, carried through the reader. In an
+  // overlay, the page underneath is where Back should lead.
+  const returnState = onClose ? toReturnState(location) : location.state;
+  /** Leave a book that no longer exists: close the overlay, or go to the library. */
+  const leave = () => (onClose ? onClose() : navigate("/"));
   const invalidate = useInvalidateBooks();
   const [editing, setEditing] = useState(false);
   const [merging, setMerging] = useState(false);
@@ -116,7 +130,7 @@ function BookView({ book }: { book: BookDetailDto }) {
         color: "teal",
         message: `Deleted ${r.deletedFiles[0] ?? "file"}${r.keptMetadata.length ? " (confirmed metadata kept)" : ""}`,
       });
-      if (r.keptMetadata.length || r.removedMetadata.length) navigate("/");
+      if (r.keptMetadata.length || r.removedMetadata.length) leave();
     },
     onError,
   });
@@ -188,9 +202,15 @@ function BookView({ book }: { book: BookDetailDto }) {
   return (
     <Stack maw={1100}>
       <Group justify="space-between">
-        <Button variant="subtle" component={Link} to={returnUrl(returnState)} leftSection={<IconArrowLeft size={16} />} px={4}>
-          Back
-        </Button>
+        {onClose ? (
+          <Anchor component={Link} to={`/books/${book.id}`} state={returnState} size="sm">
+            Open page
+          </Anchor>
+        ) : (
+          <Button variant="subtle" component={Link} to={returnUrl(returnState)} leftSection={<IconArrowLeft size={16} />} px={4}>
+            Back
+          </Button>
+        )}
         <Group gap="xs">
           {readFile && (
             <Button component={Link} to={readerUrl(book.id, readFile.hash)} state={returnState} color="teal" leftSection={<IconBook size={16} />}>
@@ -224,6 +244,7 @@ function BookView({ book }: { book: BookDetailDto }) {
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
+          {onClose && <CloseButton size="lg" onClick={onClose} aria-label="Close" ml="xs" />}
         </Group>
       </Group>
 
@@ -428,7 +449,7 @@ function BookView({ book }: { book: BookDetailDto }) {
             : remove.mutate([book.id], {
                 onSuccess: () => {
                   setDeleting(undefined);
-                  navigate("/");
+                  leave();
                 },
               })
         }

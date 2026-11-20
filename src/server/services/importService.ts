@@ -5,13 +5,12 @@ import type { BooksRepo } from "../db/repo/books.ts";
 import type { HashCacheRepo } from "../db/repo/hashCache.ts";
 import type { EventBus } from "../events.ts";
 import type { Extractor } from "../extract/index.ts";
-import { mergeMetadata } from "../extract/merge.ts";
+import type { MergeResult } from "../extract/merge.ts";
 import type { Library } from "../library/library.ts";
 import type { FileToLink } from "../library/linker.ts";
 import { INCOMING_DIR, validateShelfName, ValidationError } from "../library/paths.ts";
 import { buildLibraryFilename, withCollisionSuffix } from "../naming/buildFilename.ts";
 import { detectFormat, type DetectedFormat } from "../naming/formats.ts";
-import { parseFilename } from "../naming/parseFilename.ts";
 import type { ImportResultDto, ImportStatus } from "../../shared/types.ts";
 import { UnavailableError } from "../api/http.ts";
 
@@ -72,7 +71,7 @@ export class ImportService {
       if (sameContent) return this.duplicate(sameContent.bookId, sameContent.relPath, detected, "This exact file is already in the library");
 
       const embedded = await this.deps.extract(tmp, detected.format);
-      const merged = mergeMetadata(embedded, parseFilename(name), detected.stem);
+      const merged = library.linker.merge(embedded, library.linker.parse(name), detected.stem);
 
       const placed = await library.linker.exclusive(() => this.decideAndPlace(root, tmp, hash, detected, ext, shelf, merged));
       if ("duplicate" in placed) return placed.duplicate;
@@ -110,7 +109,7 @@ export class ImportService {
     detected: DetectedFormat,
     ext: string,
     shelf: string | null,
-    merged: ReturnType<typeof mergeMetadata>,
+    merged: MergeResult,
   ): Placed | { duplicate: ImportResultDto } {
     const { library, books, hashCache } = this.deps;
     const index = library.index;
@@ -181,6 +180,7 @@ export class ImportService {
       relPath,
       shelf,
       message: message ?? defaults[status],
+      lookupQueued: false,
     };
   }
 

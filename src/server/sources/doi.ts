@@ -78,6 +78,7 @@ function toCandidate(w: WorkRecord, doi: string, via: "crossref" | "doi.org", ma
     coverUrl: null,
     olEditionKey: null,
     olWorkKey: null,
+    workType: w.type ?? null,
   };
 }
 

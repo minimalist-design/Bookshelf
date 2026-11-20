@@ -52,3 +52,24 @@ export function emptyMetadata(title: string): BookMetadata {
     tags: [],
   };
 }
+
+/** Just the metadata fields of a record that has more (e.g. a stored book). */
+export function pickMetadata(m: BookMetadata): BookMetadata {
+  return {
+    title: m.title,
+    subtitle: m.subtitle,
+    authors: m.authors,
+    isbn13: m.isbn13,
+    doi: m.doi,
+    publisher: m.publisher,
+    edition: m.edition,
+    publishedDate: m.publishedDate,
+    year: m.year,
+    language: m.language,
+    pages: m.pages,
+    description: m.description,
+    series: m.series,
+    seriesIndex: m.seriesIndex,
+    tags: m.tags,
+  };
+}

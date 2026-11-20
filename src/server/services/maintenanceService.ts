@@ -7,7 +7,9 @@ import type { BooksRepo } from "../db/repo/books.ts";
 import type { EventBus } from "../events.ts";
 import type { Library } from "../library/library.ts";
 import { validateShelfName } from "../library/paths.ts";
-import type { BookFormat, BulkRenameResult, CleanupResult, MaintenanceStats, MissingBookDto } from "../../shared/types.ts";
+import type { BookFormat, BulkRenameResult, CleanupResult, MaintenanceStats, MetadataRulesResult, MissingBookDto } from "../../shared/types.ts";
+import { applyRules } from "../metadata/rules.ts";
+import { pickMetadata } from "../metadata/types.ts";
 import { UnavailableError } from "../api/http.ts";
 import type { BookService } from "./bookService.ts";
 
@@ -23,16 +25,20 @@ export interface MaintenanceDeps {
 
 const count = (db: Database, sql: string) => (db.query(sql).get() as { n: number }).n;
 
+/** Wait for a complete index of an accessible library (bulk operations need to see every book). */
+export async function libraryReady(library: Library): Promise<void> {
+  if (!library.rootPath) throw new UnavailableError("No library directory is configured");
+  await library.whenReady();
+  if (library.status().state === "unavailable") throw new UnavailableError("The library directory is not accessible");
+}
+
 /** Housekeeping: metadata without files, cover files, caches, bulk filename normalization. */
 export class MaintenanceService {
   constructor(private readonly deps: MaintenanceDeps) {}
 
   /** The index must be complete before deciding what is "missing". */
-  private async ready(): Promise<void> {
-    const { library } = this.deps;
-    if (!library.rootPath) throw new UnavailableError("No library directory is configured");
-    await library.whenReady();
-    if (library.status().state === "unavailable") throw new UnavailableError("The library directory is not accessible");
+  private ready(): Promise<void> {
+    return libraryReady(this.deps.library);
   }
 
   private missingIds(): number[] {
@@ -101,6 +107,29 @@ export class MaintenanceService {
     return { removedBooks: removed.length, removedCoverFiles: this.removeOrphanCovers() };
   }
 
+  /**
+   * Run the built-in metadata rules (`metadata/rules.ts`) over every book whose metadata isn't
+   * confirmed: imports already get them, this fixes books added before a rule existed. Confirmed
+   * metadata (looked up or edited) is left as it is. Files are not renamed.
+   */
+  async applyMetadataRules(): Promise<MetadataRulesResult> {
+    await this.ready();
+    const { library, books, events } = this.deps;
+    const changed = await library.linker.exclusive(() => {
+      const records = [...books.getMany(books.allIds()).values()].filter((b) => b.confirmedSource === null);
+      return records
+        .map((b) => ({ id: b.id, before: pickMetadata(b) }))
+        .map(({ id, before }) => ({ id, before, after: applyRules(before) }))
+        .filter(({ before, after }) => after !== before)
+        .map(({ id, after }) => {
+          books.updateMetadata(id, after, null);
+          return id;
+        });
+    });
+    if (changed.length) events.libraryChanged(changed);
+    return { changed: changed.length };
+  }
+
   /** Normalize filenames of every book on a shelf ("" = Unshelved) or in the whole library (undefined). */
   async normalize(shelf: string | null | undefined): Promise<BulkRenameResult> {
     await this.ready();
@@ -138,6 +167,9 @@ export class MaintenanceService {
       reviewQueue: count(db, "SELECT count(*) AS n FROM review_queue"),
       hashCacheEntries: count(db, "SELECT count(*) AS n FROM file_hash_cache"),
       httpCacheEntries: count(db, "SELECT count(*) AS n FROM http_cache"),
+      isbndbRecords: count(db, "SELECT count(*) AS n FROM isbndb_records"),
+      isbndbCovers: count(db, "SELECT count(*) AS n FROM isbndb_records WHERE cover_state = 'done'"),
+      isbndbCoverBytes: count(db, "SELECT COALESCE(SUM(cover_bytes), 0) AS n FROM isbndb_records WHERE cover_state = 'done'"),
       coverFiles: covers.length,
       coverBytes: covers.reduce((n, c) => n + c.size, 0),
       orphanCoverFiles: covers.filter((c) => c.bookId === null || !bookIds.has(c.bookId)).length,

@@ -2,6 +2,7 @@ import { splitAuthors } from "./authors.ts";
 import { doiFromFilename } from "./doi.ts";
 import { detectFormat } from "./formats.ts";
 import { isValidIsbn13, normalizeIsbn } from "./isbn.ts";
+import { orientationMargin, orientationOf, personNameScore, type KnownAuthor } from "./nameShape.ts";
 
 export type NamePattern = "import" | "library" | "plain";
 
@@ -32,14 +33,22 @@ function tidy(s: string | undefined): string | null {
   return t ? t : null;
 }
 
-/** Accepts a full filename (extension optional). */
-export function parseFilename(filename: string): ParsedFilename {
-  const stem = detectFormat(filename)?.stem ?? filename;
-  return stem.includes(IMPORT_SEP) ? parseImportPattern(stem) : parseLibraryOrPlain(stem);
+export interface ParseOptions {
+  /** Whether a name is already an author in the library; helps tell "Title - Author" from "Author - Title". */
+  isKnownAuthor?: KnownAuthor;
 }
 
-/** `{title} -- {author}[ -- …]` with `isbn13 …` / `doi …` tokens anywhere. */
-function parseImportPattern(stem: string): ParsedFilename {
+/** Accepts a full filename (extension optional). */
+export function parseFilename(filename: string, opts: ParseOptions = {}): ParsedFilename {
+  const stem = detectFormat(filename)?.stem ?? filename;
+  return stem.includes(IMPORT_SEP) ? parseImportPattern(stem, opts) : parseLibraryOrPlain(stem, opts);
+}
+
+/**
+ * `{title} -- {author}[ -- …]` with `isbn13 …` / `doi …` tokens anywhere. The first two segments
+ * are swapped only when the first is clearly a name and the second clearly a title.
+ */
+function parseImportPattern(stem: string, opts: ParseOptions): ParsedFilename {
   const out = emptyResult("import");
   const positional: string[] = [];
 
@@ -61,16 +70,31 @@ function parseImportPattern(stem: string): ParsedFilename {
     if (tidy(segment) !== null || segment === rawSegment) positional.push(segment);
   }
 
-  out.title = tidy(positional[0]);
-  out.authors = splitAuthors(tidy(positional[1]));
+  const [first, second] = [tidy(positional[0]), tidy(positional[1])];
+  const swapped =
+    first !== null &&
+    second !== null &&
+    personNameScore(second, opts.isKnownAuthor) <= -2 &&
+    orientationOf(personNameScore(first, opts.isKnownAuthor), personNameScore(second, opts.isKnownAuthor)) === "first-is-author";
+  out.title = swapped ? second : first;
+  out.authors = splitAuthors(swapped ? first : second);
   if (out.isbn13) out.isbn13Valid = isValidIsbn13(out.isbn13);
   return out;
 }
 
 const LIBRARY = /^(.+?) - (.+?)(?: \[([^\]]+)\])?(?: \((\d+)\))?$/;
+const LIBRARY_SEP = " - ";
+const UNKNOWN = "Unknown";
 
-/** `{author} - {title} [{id}]` (as written by the app), else the whole stem is the title. */
-function parseLibraryOrPlain(stem: string): ParsedFilename {
+/**
+ * `{author} - {title} [{id}]` as written by the app, or `{title} - {author}` as many downloads are
+ * named; else the whole stem is the title.
+ *
+ * With an ID bracket the name was written by the app, so it is read in the app's order. Without
+ * one, the split (at any ` - `) and the order come from which side reads as a person's name,
+ * falling back to the app's order at the first ` - ` when the names don't say.
+ */
+function parseLibraryOrPlain(stem: string, opts: ParseOptions): ParsedFilename {
   const m = LIBRARY.exec(stem.trim());
   if (!m) {
     const out = emptyResult("plain");
@@ -80,15 +104,18 @@ function parseLibraryOrPlain(stem: string): ParsedFilename {
   const [, authorPart, titlePart, bracket, counter] = m;
   const out = emptyResult("library");
   let title = titlePart!;
+  let isId = false;
 
   if (bracket !== undefined) {
     const compact = bracket.replace(/[\s-]/g, "");
     if (/^97[89]\d{10}$/.test(compact)) {
       out.isbn13 = compact;
       out.isbn13Valid = isValidIsbn13(compact);
+      isId = true;
     } else if (/^10\.\d{4,9}[_\/]/.test(bracket)) {
       out.doi = doiFromFilename(bracket);
       out.doiToken = out.doi ? bracket : null;
+      isId = true;
     } else {
       title += ` [${bracket}]`; // not an ID: belongs to the title
     }
@@ -96,8 +123,36 @@ function parseLibraryOrPlain(stem: string): ParsedFilename {
   // A collision counter is only meaningful after an ID bracket; otherwise it is part of the title.
   if (counter !== undefined && bracket === undefined) title += ` (${counter})`;
 
-  out.title = tidy(title);
-  const authors = splitAuthors(authorPart);
-  out.authors = authors.length === 1 && authors[0] === "Unknown" ? [] : authors;
+  const { author, title: finalTitle } = isId
+    ? { author: authorPart!, title }
+    : orientName(`${authorPart}${LIBRARY_SEP}${title}`, opts) ?? { author: authorPart!, title };
+
+  out.title = tidy(finalTitle);
+  const authors = splitAuthors(author);
+  out.authors = authors.length === 1 && authors[0] === UNKNOWN ? [] : authors;
   return out;
+}
+
+/**
+ * The surest way to read `name` as author and title: every ` - ` is a possible split, each side
+ * possibly the author. `null` when no split has a clear person's name on one side only.
+ */
+function orientName(name: string, opts: ParseOptions): { author: string; title: string } | null {
+  const pieces = name.split(LIBRARY_SEP);
+  if (pieces[0]?.trim() === UNKNOWN) return null; // the app's own "Unknown - Title"
+  const candidates = pieces.slice(1).flatMap((_, i) => {
+    const left = pieces.slice(0, i + 1).join(LIBRARY_SEP);
+    const right = pieces.slice(i + 1).join(LIBRARY_SEP);
+    if (right.trim() === UNKNOWN) return [{ author: right, title: left, name: Infinity, margin: Infinity }];
+    const [a, b] = [personNameScore(left, opts.isKnownAuthor), personNameScore(right, opts.isKnownAuthor)];
+    const o = orientationOf(a, b);
+    if (!o) return [];
+    const margin = orientationMargin(a, b);
+    return [o === "first-is-author" ? { author: left, title: right, name: a, margin } : { author: right, title: left, name: b, margin }];
+  });
+  // The most name-like author wins; the gap only breaks ties (a long title side always looks very
+  // unlike a name, so the gap alone would favour splits that leave title pieces on the author side).
+  const better = (c: (typeof candidates)[number], b: (typeof candidates)[number]) => c.name > b.name || (c.name === b.name && c.margin > b.margin);
+  const best = candidates.reduce<(typeof candidates)[number] | null>((b, c) => (b === null || better(c, b) ? c : b), null);
+  return best && { author: best.author, title: best.title };
 }

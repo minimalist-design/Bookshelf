@@ -1,11 +1,12 @@
-import { AppShell, Burger, Button, Center, Group, Loader, NavLink, ScrollArea, Title } from "@mantine/core";
+import { ActionIcon, AppShell, Burger, Button, Center, Group, Loader, NavLink, ScrollArea, Title } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { IconBooks, IconPlus, IconSettings } from "@tabler/icons-react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router";
 import { useServerEvents, useSettings } from "./api/hooks.ts";
 import { lazy, Suspense } from "react";
-import { ImportCenter, useImport } from "./components/ImportCenter.tsx";
+import { ImportQueueProvider, useImportQueue } from "./components/ImportQueue.tsx";
 import { ShelfNav } from "./components/ShelfNav.tsx";
+import { AddBooks } from "./pages/AddBooks.tsx";
 import { BookDetail } from "./pages/BookDetail.tsx";
 import { Library } from "./pages/Library.tsx";
 import { ReviewQueue } from "./pages/ReviewQueue.tsx";
@@ -51,9 +52,9 @@ export function App() {
       <Route
         path="*"
         element={
-          <ImportCenter>
+          <ImportQueueProvider>
             <Shell />
-          </ImportCenter>
+          </ImportQueueProvider>
         }
       />
     </Routes>
@@ -61,11 +62,17 @@ export function App() {
 }
 
 function AddBooksButton() {
-  const { open } = useImport();
+  const { open } = useImportQueue();
   return (
-    <Button leftSection={<IconPlus size={16} />} onClick={open} size="sm">
-      Add books
-    </Button>
+    <>
+      <Button leftSection={<IconPlus size={16} />} onClick={open} size="sm" visibleFrom="xs">
+        Add books
+      </Button>
+      {/* Phones: icon only, so the header stays on one line. */}
+      <ActionIcon onClick={open} size="lg" hiddenFrom="xs" aria-label="Add books">
+        <IconPlus size={18} />
+      </ActionIcon>
+    </>
   );
 }
 
@@ -75,7 +82,7 @@ function Shell() {
   return (
     <AppShell header={{ height: 56 }} navbar={{ width: 260, breakpoint: "sm", collapsed: { mobile: !opened } }} padding="md">
       <AppShell.Header>
-        <Group h="100%" px="md">
+        <Group h="100%" px="md" wrap="nowrap">
           <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
           <IconBooks />
           <Title order={3} style={{ flex: 1 }}>
@@ -104,6 +111,7 @@ function Shell() {
         <Routes>
           <Route path="/" element={<Library />} />
           <Route path="/books/:id" element={<BookDetail />} />
+          <Route path="/add" element={<AddBooks />} />
           <Route path="/review" element={<ReviewQueue />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />

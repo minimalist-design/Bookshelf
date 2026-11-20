@@ -330,6 +330,34 @@ describe("merge + junk", () => {
     expect(r3.source).toBe("filename");
   });
 
+  test("swapped or copied embedded title and author are put right", () => {
+    // Swapped in the file: the author reads as a title, the title as a name.
+    const swapped = mergeMetadata(
+      { title: "Fokkinga M M", authors: ["A gentle introduction to category theory T"] },
+      parseFilename("paper.pdf"),
+      "paper",
+    );
+    expect(swapped.metadata).toMatchObject({ title: "A gentle introduction to category theory T", authors: ["M. M. Fokkinga"] });
+
+    // The title copied into Author (or the filename into it) is no author at all.
+    const copied = mergeMetadata({ title: "Category Theory Notes", authors: ["Category Theory Notes"] }, parseFilename("notes.pdf"), "notes");
+    expect(copied.metadata.authors).toEqual([]);
+    const stem = mergeMetadata({ title: "Notes", authors: ["scan_0042"] }, parseFilename("scan_0042.pdf"), "scan_0042");
+    expect(stem.metadata.authors).toEqual([]);
+
+    // A title-like author gives way to a name from the filename; so does a title that is that name.
+    const fromName = mergeMetadata(
+      { title: "Jane Doe", authors: ["The Long Road Home"] },
+      parseFilename("The Long Road Home -- Jane Doe.epub"),
+      "The Long Road Home -- Jane Doe",
+    );
+    expect(fromName.metadata).toMatchObject({ title: "The Long Road Home", authors: ["Jane Doe"] });
+
+    // Ordinary embedded metadata is left alone.
+    const fine = mergeMetadata({ title: "Emma", authors: ["Jane Austen"] }, parseFilename("Emma - Jane Austen.epub"), "Emma - Jane Austen");
+    expect(fine.metadata).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
+  });
+
   test("text helpers", () => {
     expect(htmlToText("<div>A&nbsp;b<br/>c</div><p>&#x41;&#66;</p>")).toBe("A b\nc\n\nAB");
     expect(normalizeDate("2010-05-01T00:00:00Z")).toBe("2010-05-01");

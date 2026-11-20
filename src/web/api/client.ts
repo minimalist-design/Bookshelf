@@ -1,13 +1,28 @@
 import type {
+  AliasDto,
+  AuthorSearchDto,
+  AuthorSource,
+  CleanupField,
+  NameGroupsDto,
+  NameMergeRequest,
+  NameMergeResult,
+  SwapSuspectDto,
+  BookRefDto,
+  IsbndbKeyDto,
+  MetadataRulesResult,
+  TitleAuthorFixRequest,
   CleanupResult,
   MaintenanceStats,
   MissingBookDto,
+  ReferenceSourceDto,
   PagesDto,
   ReadingPosition,
   ApplyMetadataRequest,
   CoverSearchResult,
+  LookupJobDto,
   LookupQueueStatus,
   LookupResult,
+  MetadataUsageDto,
   LookupSource,
   ReviewItemDto,
   DeleteResult,
@@ -103,6 +118,10 @@ export const api = {
     request<BookActionResult>(`/api/books/${id}/apply-metadata`, { method: "POST", body: JSON.stringify(req) }),
   enqueueLookups: (ids: number[]) => request<LookupQueueStatus>("/api/lookup/bulk", { method: "POST", body: JSON.stringify({ ids }) }),
   lookupStatus: () => request<LookupQueueStatus>("/api/lookup/status"),
+  lookupJobs: (ids: number[]) => request<Record<number, LookupJobDto | null>>(`/api/lookup/jobs${qs({ ids: ids.join(",") })}`),
+  /** Metadata API usage; `since` (server epoch ms) bounds the session counts. Omit it to learn the server's time. */
+  isbndbKey: () => request<IsbndbKeyDto | null>("/api/isbndb/key"),
+  metadataUsage: (since?: number) => request<MetadataUsageDto>(`/api/metadata-usage${qs({ since })}`),
   cancelLookups: () => request<LookupQueueStatus>("/api/lookup/cancel", { method: "POST" }),
   retryFailedLookups: () => request<LookupQueueStatus>("/api/lookup/retry-failed", { method: "POST" }),
   reviewQueue: () => request<ReviewItemDto[]>("/api/review-queue"),
@@ -117,25 +136,68 @@ export const api = {
   missingBooks: () => request<MissingBookDto[]>("/api/maintenance/missing"),
   forgetBooks: (ids: number[]) => request<CleanupResult>("/api/maintenance/missing", { method: "POST", body: JSON.stringify({ ids }) }),
   cleanup: () => request<CleanupResult>("/api/maintenance/cleanup", { method: "POST" }),
+  applyMetadataRules: () => request<MetadataRulesResult>("/api/maintenance/rules", { method: "POST" }),
   /** shelf: undefined = whole library, "" = Unshelved. */
   normalizeAll: (shelf?: string) =>
     request<BulkRenameResult>("/api/maintenance/normalize", { method: "POST", body: JSON.stringify(shelf === undefined ? {} : { shelf }) }),
   clearHttpCache: () => request<{ removed: number }>("/api/maintenance/http-cache", { method: "DELETE" }),
+  nameGroups: (field: CleanupField) => request<NameGroupsDto>(`/api/cleanup/groups${qs({ field })}`),
+  mergeNames: (body: NameMergeRequest) => request<NameMergeResult>("/api/cleanup/merge", { method: "POST", body: JSON.stringify(body) }),
+  searchAuthors: (q: string, source?: AuthorSource) => request<AuthorSearchDto>(`/api/cleanup/author-search${qs({ q, source })}`),
+  booksWithName: (field: CleanupField, name: string) => request<BookRefDto[]>(`/api/cleanup/books${qs({ field, name })}`),
+  swapSuspects: () => request<SwapSuspectDto[]>("/api/cleanup/swaps"),
+  fixTitleAuthor: (body: TitleAuthorFixRequest) =>
+    request<NameMergeResult>("/api/cleanup/swaps", { method: "POST", body: JSON.stringify(body) }),
+  aliases: () => request<AliasDto[]>("/api/cleanup/aliases"),
+  removeAlias: (field: CleanupField, variant: string) =>
+    request<AliasDto[]>("/api/cleanup/aliases", { method: "DELETE", body: JSON.stringify({ field, variant }) }),
   removeCover: (id: number) => request<BookDetailDto>(`/api/books/${id}/cover`, { method: "DELETE" }),
   getStatus: () => request<LibraryStatus>("/api/library/status"),
   rescan: () => request<LibraryStatus>("/api/library/rescan", { method: "POST" }),
   getShelves: () => request<ShelfDto[]>("/api/shelves"),
   getBook: (id: number) => request<BookDetailDto>(`/api/books/${id}`),
+  referenceSources: () => request<ReferenceSourceDto[]>("/api/reference"),
+  importReferenceFromServer: (path: string) =>
+    request<ReferenceSourceDto>("/api/reference/from-file", { method: "POST", body: JSON.stringify({ path }) }),
+  removeReference: (source: string) => request<{ removed: string }>(`/api/reference/${encodeURIComponent(source)}`, { method: "DELETE" }),
 };
+
+/** Upload a reference file (raw body) with progress; resolves with the imported source. */
+export function uploadReference(file: File, onProgress: (fraction: number) => void): Promise<ReferenceSourceDto> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/reference${qs({ name: file.name })}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      let body: any = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        /* not JSON */
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as ReferenceSourceDto);
+      else reject(new ApiRequestError(body?.error ?? (xhr.statusText || "Upload failed"), xhr.status));
+    };
+    xhr.onerror = () => reject(new ApiRequestError("Network error during upload", 0));
+    xhr.send(file);
+  });
+}
 
 /**
  * Upload one file (raw body) with progress. Resolves with the import result for
  * imported/attached/reconnected and duplicate (409) outcomes; rejects on errors.
+ * `lookup` queues a metadata lookup when the upload creates a new book.
  */
-export function uploadBook(file: File, shelf: string | null, onProgress: (fraction: number) => void, signal?: AbortSignal): Promise<ImportResultDto> {
+export function uploadBook(
+  file: File,
+  target: { shelf: string | null; lookup?: boolean },
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<ImportResultDto> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/import${qs({ filename: file.name, shelf: shelf ?? undefined })}`);
+    xhr.open("POST", `/api/import${qs({ filename: file.name, shelf: target.shelf ?? undefined, lookup: target.lookup ? 1 : undefined })}`);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {

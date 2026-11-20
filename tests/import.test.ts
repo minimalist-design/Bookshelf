@@ -24,6 +24,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  app.lookup.stop();
   await app.library.close();
   app.db.close();
   rmSync(tmp, { recursive: true, force: true });
@@ -167,6 +168,30 @@ describe("HTTP endpoint", () => {
       const bad = await post(makePdf(), "x.txt");
       expect(bad.status).toBe(400);
       expect((await bad.json()).error).toMatch(/Unsupported/);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("lookup=1 queues a metadata lookup for new books only", async () => {
+    app.lookup.stop(); // keep the jobs queued: no network in this test
+    const server = Bun.serve({ port: 0, routes: apiRoutes(app) });
+    try {
+      const post = (data: Uint8Array, filename: string, lookup = true) =>
+        fetch(`${server.url}api/import?${new URLSearchParams({ filename, ...(lookup ? { lookup: "1" } : {}) })}`, { method: "POST", body: new Blob([data as BlobPart]) });
+      const data = await epub("Dune", ["Frank Herbert"], "9780441172719");
+      const created = await (await post(data, "dune.epub")).json();
+      expect(created).toMatchObject({ status: "imported", lookupQueued: true });
+      const duplicate = await (await post(data, "dune.epub")).json();
+      expect(duplicate).toMatchObject({ status: "duplicate", lookupQueued: false });
+      const attached = await (await post(makePdf({ info: { Keywords: "ISBN 9780441172719" } }), "dune.pdf")).json();
+      expect(attached).toMatchObject({ status: "attached", lookupQueued: false });
+      const plain = await (await post(await epub("Emma", ["Jane Austen"]), "emma.epub", false)).json();
+      expect(plain).toMatchObject({ status: "imported", lookupQueued: false });
+
+      const jobs = await (await fetch(`${server.url}api/lookup/jobs?ids=${created.bookId},${plain.bookId}`)).json();
+      expect(jobs).toEqual({ [created.bookId]: { state: "pending", position: 0, error: null }, [plain.bookId]: null });
+      expect((await fetch(`${server.url}api/lookup/jobs?ids=x`)).status).toBe(400);
     } finally {
       server.stop(true);
     }

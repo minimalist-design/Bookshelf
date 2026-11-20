@@ -1,5 +1,5 @@
 import type { AppContext } from "../app.ts";
-import type { ApplyMetadataRequest, BookUpdate, LookupSource, SettingsUpdate } from "../../shared/types.ts";
+import { LOOKUP_SOURCES, type ApplyMetadataRequest, type BookUpdate, type LookupSource, type SettingsUpdate } from "../../shared/types.ts";
 import { ValidationError } from "../library/paths.ts";
 import { browseDirectories, makeDirectory } from "./fsBrowse.ts";
 import { health } from "./health.ts";
@@ -109,11 +109,16 @@ export function apiRoutes(app: AppContext) {
         return json(bookDetail(app, Number(req.params.id)));
       }),
     },
-    // Raw file body (streamed); ?filename=<original name>&shelf=<name> (omitted/empty = Unshelved).
+    // Raw file body (streamed); ?filename=<original name>&shelf=<name> (omitted/empty = Unshelved)
+    // &lookup=1 to queue a metadata lookup when the upload creates a new book.
     "/api/import": {
       POST: handle(async (req) => {
         const url = new URL(req.url);
         const result = await app.importer.importStream(req.body, url.searchParams.get("filename") ?? "", url.searchParams.get("shelf"));
+        if (result.status === "imported" && url.searchParams.get("lookup") === "1") {
+          app.lookup.enqueue([result.bookId]);
+          result.lookupQueued = true;
+        }
         const status = result.status === "duplicate" ? 409 : result.status === "attached" ? 200 : 201;
         return json(result, { status });
       }),
@@ -146,6 +151,7 @@ export function apiRoutes(app: AppContext) {
       POST: handle(async (req) => json(await app.maintenance.forget(idList((await readJson<{ ids: unknown }>(req)).ids)))),
     },
     "/api/maintenance/cleanup": { POST: handle(async () => json(await app.maintenance.cleanup())) },
+    "/api/maintenance/rules": { POST: handle(async () => json(await app.maintenance.applyMetadataRules())) },
     "/api/maintenance/normalize": {
       POST: handle(async (req) => {
         const { shelf } = await readJson<{ shelf?: unknown }>(req);
@@ -153,18 +159,79 @@ export function apiRoutes(app: AppContext) {
         return json(await app.maintenance.normalize(shelf as string | null | undefined));
       }),
     },
+    // Reference data: GET lists the imported files; POST imports the request body (raw file, ?name=<file name>).
+    "/api/reference": {
+      GET: handle(() => json(app.reference.list())),
+      POST: handle(async (req) => json(await app.reference.importUpload(req.body, new URL(req.url).searchParams.get("name") ?? ""), { status: 201 })),
+    },
+    "/api/reference/from-file": {
+      POST: handle(async (req) => {
+        const { path } = await readJson<{ path?: unknown }>(req);
+        if (typeof path !== "string") throw new ValidationError("path must be a file path on the server");
+        return json(await app.reference.importFile(path), { status: 201 });
+      }),
+    },
+    "/api/reference/:source": {
+      DELETE: handle((req: Bun.BunRequest<"/api/reference/:source">) => {
+        app.reference.remove(req.params.source);
+        return json({ removed: req.params.source });
+      }),
+    },
     "/api/maintenance/http-cache": { DELETE: handle(() => json({ removed: app.maintenance.clearHttpCache() })) },
+    "/api/cleanup/groups": {
+      GET: handle(async (req) => json(await app.cleanup.groups(new URL(req.url).searchParams.get("field")))),
+    },
+    "/api/cleanup/merge": {
+      POST: handle(async (req) => {
+        const body = await readJson<{ field: unknown; from: unknown; to: unknown }>(req);
+        return json(await app.cleanup.merge(body.field, body.from, body.to));
+      }),
+    },
+    "/api/cleanup/author-search": {
+      GET: handle(async (req) => {
+        const params = new URL(req.url).searchParams;
+        return json(await app.cleanup.searchAuthors(params.get("q"), params.get("source")));
+      }),
+    },
+    "/api/cleanup/books": {
+      GET: handle(async (req) => {
+        const params = new URL(req.url).searchParams;
+        return json(await app.cleanup.booksWithName(params.get("field"), params.get("name")));
+      }),
+    },
+    "/api/cleanup/swaps": {
+      GET: handle(async () => json(await app.cleanup.swapSuspects())),
+      POST: handle(async (req) => json(await app.cleanup.fixTitleAuthor((await readJson<{ items: unknown }>(req)).items))),
+    },
+    "/api/cleanup/aliases": {
+      GET: handle(() => json(app.cleanup.aliases())),
+      DELETE: handle(async (req) => {
+        const body = await readJson<{ field: unknown; variant: unknown }>(req);
+        app.cleanup.removeAlias(body.field, body.variant);
+        return json(app.cleanup.aliases());
+      }),
+    },
     "/api/lookup/status": { GET: handle(() => json(app.lookup.status())) },
     "/api/lookup/bulk": {
       POST: handle(async (req) => json(app.lookup.enqueue(idList((await readJson<{ ids: unknown }>(req)).ids)), { status: 202 })),
     },
+    "/api/lookup/jobs": {
+      GET: handle((req) => json(app.lookup.jobs(idList((new URL(req.url).searchParams.get("ids") ?? "").split(",").filter(Boolean).map(Number))))),
+    },
+    "/api/metadata-usage": {
+      GET: handle((req) => {
+        const since = Number(new URL(req.url).searchParams.get("since"));
+        return json(app.http.usage(Number.isFinite(since) && since > 0 ? since : Date.now()));
+      }),
+    },
+    "/api/isbndb/key": { GET: handle(async () => json(await app.lookup.isbndbKey())) },
     "/api/lookup/cancel": { POST: handle(() => json(app.lookup.cancel())) },
     "/api/lookup/retry-failed": { POST: handle(() => json(app.lookup.retryFailed(), { status: 202 })) },
     "/api/lookup/:id": {
       GET: handle(async (req: Bun.BunRequest<"/api/lookup/:id">) => {
         const p = new URL(req.url).searchParams;
         const source = p.get("source");
-        if (source && source !== "openlibrary" && source !== "doi") throw new ValidationError("source must be openlibrary or doi");
+        if (source && !(LOOKUP_SOURCES as readonly string[]).includes(source)) throw new ValidationError(`source must be one of ${LOOKUP_SOURCES.join(", ")}`);
         return json(await app.lookup.lookup(Number(req.params.id), { source: (source as LookupSource) || undefined, q: p.get("q") || undefined }));
       }),
     },

@@ -18,6 +18,7 @@ import { notifications } from "@mantine/notifications";
 import { IconInfoCircle } from "@tabler/icons-react";
 import type { BookDetailDto, BookUpdate } from "../../../shared/types.ts";
 import { useFacets, useUpdateBook } from "../../api/hooks.ts";
+import { AuthorsInput } from "../AuthorsInput.tsx";
 
 type FormState = {
   title: string;
@@ -140,10 +141,9 @@ export function EditBookModal({ book, opened, onClose }: { book: BookDetailDto; 
               <TextInput label="Subtitle" value={f.subtitle} onChange={(e) => set("subtitle", e.currentTarget.value)} />
             </Grid.Col>
             <Grid.Col span={12}>
-              <TagsInput
+              <AuthorsInput
                 label="Authors"
-                description='One author per entry ("Last, First" is converted). Press Enter after each.'
-                data={names(facets.data?.authors)}
+                description='One author per entry ("Last, First" is converted). Press Enter after each; click a name to edit it.'
                 value={f.authors}
                 onChange={(v) => set("authors", v)}
                 splitChars={[";"]}

@@ -1,4 +1,6 @@
+import { foldKey } from "../cleanup/similarity.ts";
 import { splitAuthors } from "../naming/authors.ts";
+import { NAME_SCORE, orientation, personNameScore, type KnownAuthor } from "../naming/nameShape.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import type { BookFormat } from "../naming/formats.ts";
@@ -16,15 +18,53 @@ function text(v: string | null | undefined): string | null {
   return t ? t : null;
 }
 
+export interface MergeOptions {
+  isKnownAuthor?: KnownAuthor;
+}
+
+const same = (a: string | null, b: string | null) => a !== null && b !== null && foldKey(a) === foldKey(b);
+
+/**
+ * Embedded title and authors with the usual mix-ups undone (PDF metadata especially):
+ * - an author that only repeats the title or the filename is dropped;
+ * - a single author that reads as a title, with a title that reads as a name, are swapped back;
+ * - title-like authors give way to name-like authors from the filename, and a title that is
+ *   just the filename's author gives way to the filename's title.
+ */
+function embeddedNames(
+  embedded: RawMetadata,
+  parsed: ParsedFilename,
+  fileStem: string,
+  known: KnownAuthor | undefined,
+): { title: string | null; authors: string[] } {
+  const title = text(embedded.title);
+  const authors = (embedded.authors ?? [])
+    .map((a) => text(a))
+    .filter((a): a is string => a !== null && !same(a, title) && !same(a, fileStem));
+
+  if (title && authors.length === 1 && orientation(authors[0]!, title, known) === "second-is-author") {
+    return { title: authors[0]!, authors: [title] };
+  }
+  const filenameHasNames = parsed.authors.length > 0 && personNameScore(parsed.authors.join("; "), known) >= NAME_SCORE.clearlyName;
+  if (!filenameHasNames) return { title, authors };
+  const authorsAreTitle = authors.length > 0 && personNameScore(authors.join("; "), known) <= NAME_SCORE.clearlyTitle;
+  const titleIsFilenameAuthor = title !== null && parsed.title !== null && parsed.authors.some((a) => same(a, title) || same(splitAuthors(title)[0] ?? null, a));
+  return {
+    title: titleIsFilenameAuthor ? null : title,
+    authors: authorsAreTitle ? [] : authors,
+  };
+}
+
 /**
  * Field-level merge: each embedded value wins unless it is junk; empty fields are
  * filled from the filename. isbn13/doi found in the filename always win.
  */
-export function mergeMetadata(embedded: RawMetadata, parsed: ParsedFilename, fileStem: string): MergeResult {
+export function mergeMetadata(embedded: RawMetadata, parsed: ParsedFilename, fileStem: string, opts: MergeOptions = {}): MergeResult {
   let usedEmbedded = false;
   let usedFilename = false;
 
-  const embTitle = text(embedded.title);
+  const names = embeddedNames(embedded, parsed, fileStem, opts.isKnownAuthor);
+  const embTitle = names.title;
   let title: string;
   // An embedded title that merely repeats a *structured* filename ("T -- A -- isbn13 …") is junk;
   // a plain filename equal to the title ("dune.epub" / "Dune") is just a well-named file.
@@ -39,7 +79,7 @@ export function mergeMetadata(embedded: RawMetadata, parsed: ParsedFilename, fil
     usedFilename = true;
   }
 
-  const embAuthors = (embedded.authors ?? [])
+  const embAuthors = names.authors
     .flatMap((a) => splitAuthors(a))
     .filter((a) => !isJunkAuthor(a));
   let authors: string[] = [];

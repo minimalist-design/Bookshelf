@@ -21,39 +21,60 @@ node_modules: package.json bun.lock
 	bun install --frozen-lockfile
 	@touch node_modules
 
-# An existing config is never changed without asking: Keep (default),
-# Update (add the template's missing settings; nothing is removed or changed),
-# or Replace (after a timestamped backup; the old config's port is kept). Without a terminal it is kept.
+# Bold text for headings and option keys, only when printing to a terminal.
+STYLE := if [ -t 1 ]; then b=$$(tput bold 2>/dev/null || true); r=$$(tput sgr0 2>/dev/null || true); else b=; r=; fi
+
+# An existing config is never changed without asking: Update (default: adds the
+# template's missing settings and never changes or removes existing ones, so a
+# new Bookshelf never runs without its new settings), Keep, or Replace (after a
+# timestamped backup; the old config's port is kept). Without a terminal it is kept.
 #
-# The env file's location is asked for (default ~/.secrets/bookshelf.env). An
-# existing env file is never touched; a new one is copied from .env.example.
+# The env file's location is asked for (default ~/.secrets/bookshelf.env); a new
+# one is copied from .env.example. An existing one gets the same choice: Update
+# (default: appends the variables it lacks, empty), Keep, or Replace (a fresh
+# copy of .env.example that keeps the values of variables still in it; no backup
+# is made, since the file holds secrets). Without a terminal it is kept.
 install: build
 	install -Dm755 $(BIN) $(BINDIR)/$(BIN)
 	@echo "installed $(BINDIR)/$(BIN)"
-	@set -e; \
+	@set -e; $(STYLE); \
 	if [ ! -e "$(CONFIG)" ]; then \
 		install -Dm644 $(TEMPLATE) "$(CONFIG)"; \
 		echo "installed $(CONFIG) from $(TEMPLATE)"; \
 	elif [ ! -t 0 ]; then \
 		echo "kept the existing $(CONFIG) (no terminal to ask; run make install from a terminal to update or replace it)"; \
 	else \
-		printf '%s already exists. [K]eep it, [u]pdate it with new fields, or [r]eplace it (a backup is kept)? ' "$(CONFIG)"; \
-		read answer; \
-		case "$$answer" in \
-		u|U) $(BINDIR)/$(BIN) config update "$(CONFIG)" ;; \
-		r|R) backup="$(CONFIG).$$(date +%Y%m%d-%H%M%S).bak"; \
-		     cp -p "$(CONFIG)" "$$backup"; \
-		     install -m644 $(TEMPLATE) "$(CONFIG)"; \
-		     bun scripts/carry-port.ts "$$backup" "$(CONFIG)"; \
-		     echo "replaced $(CONFIG) (backup: $$backup)" ;; \
-		*)   echo "kept $(CONFIG)" ;; \
-		esac; \
+		echo; \
+		echo "$${b}The config file already exists$${r}"; \
+		echo "  $$($(BINDIR)/$(BIN) config version "$(CONFIG)")"; \
+		echo; \
+		echo "  $${b}u$${r}  Update   add the new settings from the template; existing values stay as they are (default)"; \
+		echo "  $${b}k$${r}  Keep     leave the file exactly as it is"; \
+		echo "  $${b}r$${r}  Replace  start over from the template; the old file is backed up and its port kept"; \
+		echo; \
+		while :; do \
+			printf 'Choose [U/k/r]: '; \
+			read answer || answer=k; \
+			case "$$answer" in \
+			""|u|U) $(BINDIR)/$(BIN) config update "$(CONFIG)"; break ;; \
+			k|K)    echo "kept $(CONFIG)"; break ;; \
+			r|R)    backup="$(CONFIG).$$(date +%Y%m%d-%H%M%S).bak"; \
+			        cp -p "$(CONFIG)" "$$backup"; \
+			        install -m644 $(TEMPLATE) "$(CONFIG)"; \
+			        bun scripts/carry-port.ts "$$backup" "$(CONFIG)"; \
+			        echo "replaced $(CONFIG) (backup: $$backup)"; break ;; \
+			*)      echo "  Type u, k or r, or just press Enter to update." ;; \
+			esac; \
+		done; \
 	fi
-	@set -e; \
+	@set -e; $(STYLE); \
 	envfile="$(ENV_DEFAULT)"; \
 	if [ -t 0 ]; then \
-		printf 'Env file for secrets [%s]: ' "$(ENV_DEFAULT)"; \
-		read answer; \
+		echo; \
+		echo "$${b}Env file for secrets$${r}"; \
+		echo "  Press Enter to use $${b}$(ENV_DEFAULT)$${r}, or type another path."; \
+		printf '  Path: '; \
+		read answer || answer=; \
 		case "$$answer" in \
 		"")   ;; \
 		"~")  envfile="$(HOME)" ;; \
@@ -67,13 +88,32 @@ install: build
 		if [ "$$envdir" = "$(SECRETS_DIR)" ]; then chmod 700 "$$envdir"; fi; \
 		echo "created $$envdir"; \
 	fi; \
-	if [ -e "$$envfile" ]; then \
-		echo "kept the existing $$envfile"; \
-	else \
+	if [ ! -e "$$envfile" ]; then \
 		install -m600 $(ENV_EXAMPLE) "$$envfile"; \
 		echo "installed $$envfile from $(ENV_EXAMPLE)"; \
+	elif [ ! -t 0 ]; then \
+		echo "kept the existing $$envfile (no terminal to ask; run make install from a terminal to update or replace it)"; \
+	else \
+		echo; \
+		echo "$${b}The env file already exists$${r}"; \
+		echo "  $$(bun scripts/env-file.ts status $(ENV_EXAMPLE) "$$envfile")"; \
+		echo; \
+		echo "  $${b}u$${r}  Update   add the variables missing from $(ENV_EXAMPLE); existing values stay as they are (default)"; \
+		echo "  $${b}k$${r}  Keep     leave the file exactly as it is"; \
+		echo "  $${b}r$${r}  Replace  start over from $(ENV_EXAMPLE); values of variables still in it are kept, no backup is made"; \
+		echo; \
+		while :; do \
+			printf 'Choose [U/k/r]: '; \
+			read answer || answer=k; \
+			case "$$answer" in \
+			""|u|U) bun scripts/env-file.ts update $(ENV_EXAMPLE) "$$envfile"; break ;; \
+			k|K)    echo "kept $$envfile"; break ;; \
+			r|R)    bun scripts/env-file.ts replace $(ENV_EXAMPLE) "$$envfile"; break ;; \
+			*)      echo "  Type u, k or r, or just press Enter to update." ;; \
+			esac; \
+		done; \
 	fi; \
-	echo "give the service this env file with serviceman's New service form or M-x set-env-file"
+	echo
 
 # The config and env files are left alone.
 uninstall:

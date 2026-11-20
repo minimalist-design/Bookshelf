@@ -1,8 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "library_root": "",
   "data_dir": "",
   "host": "0.0.0.0",
   "port": 0,
-  "max_upload_mb": 16384
+  "max_upload_mb": 16384,
+  "isbndb_daily_limit": 5000,
+  "isbndb_per_second": 1,
+  "isbndb_bulk_size": 100
 }

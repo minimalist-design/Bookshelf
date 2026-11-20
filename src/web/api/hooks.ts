@@ -40,6 +40,16 @@ export const useBook = (id: number | null) =>
   useQuery({ queryKey: ["book", id], queryFn: () => api.getBook(id!), enabled: id !== null, retry: false });
 
 export const useLookupStatus = () => useQuery({ queryKey: ["lookupStatus"], queryFn: api.lookupStatus });
+
+/** Metadata API usage since `since` (server time), refreshed every few seconds while shown. */
+export const useMetadataUsage = (since: number | null) =>
+  useQuery({
+    queryKey: ["metadataUsage", since],
+    queryFn: () => api.metadataUsage(since!),
+    enabled: since !== null,
+    refetchInterval: 5000,
+    placeholderData: keepPreviousData,
+  });
 export const useReviewQueue = () => useQuery({ queryKey: ["reviewQueue"], queryFn: api.reviewQueue });
 
 export const useFacets = () => useQuery({ queryKey: ["facets"], queryFn: api.getFacets, staleTime: 30_000 });
@@ -48,7 +58,7 @@ export const useFacets = () => useQuery({ queryKey: ["facets"], queryFn: api.get
 export function useInvalidateBooks() {
   const qc = useQueryClient();
   return () => {
-    for (const key of ["library", "shelves", "book", "facets", "libraryStatus", "reviewQueue", "lookupStatus", "maintenance"]) {
+    for (const key of ["library", "shelves", "book", "facets", "libraryStatus", "reviewQueue", "lookupStatus", "maintenance", "cleanup"]) {
       qc.invalidateQueries({ queryKey: [key] });
     }
   };
@@ -90,9 +100,12 @@ export function useServerEvents(): void {
           qc.invalidateQueries({ queryKey: ["book"] });
           qc.invalidateQueries({ queryKey: ["facets"] });
           qc.invalidateQueries({ queryKey: ["maintenance"] });
+          qc.invalidateQueries({ queryKey: ["cleanup", "groups"] });
+          qc.invalidateQueries({ queryKey: ["libraryStatus"] }); // book count (uploads don't emit a status)
         } else if (event.type === "lookup.status") {
           const prev = qc.getQueryData<LookupQueueStatus>(["lookupStatus"]);
           qc.setQueryData(["lookupStatus"], event.status);
+          qc.invalidateQueries({ queryKey: ["lookupJobs"] });
           if (prev?.reviewCount !== event.status.reviewCount) qc.invalidateQueries({ queryKey: ["reviewQueue"] });
         } else if (event.type === "library.status") {
           const prev = qc.getQueryData<LibraryStatus>(["libraryStatus"]);

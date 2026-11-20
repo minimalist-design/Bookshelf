@@ -1,8 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, type AppContext } from "../src/server/app.ts";
+import { migrate } from "../src/server/db/migrate.ts";
 import { loadConfig } from "../src/server/config.ts";
 import type { ConfigFileSettings } from "../src/server/configFile.ts";
 import { getSettings, prepareConfigLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
@@ -30,10 +33,49 @@ describe("database", () => {
     const app = makeApp();
     const tables = app.db.query("SELECT name FROM sqlite_master WHERE type IN ('table')").all() as { name: string }[];
     const names = tables.map((t) => t.name);
-    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "lookup_jobs"]) {
+    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "lookup_jobs", "http_calls", "aliases"]) {
       expect(names).toContain(t);
     }
-    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
+    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
+  });
+
+  /**
+   * Databases live outside this machine too, already migrated: a migration, once written, is never
+   * edited (they run by number, so an edit never reaches them). Change the schema with a new one.
+   */
+  test("migrations are append-only: every existing file is exactly as first written", () => {
+    const dir = join(import.meta.dir, "../src/server/db/migrations");
+    const sums = Object.fromEntries(
+      readdirSync(dir)
+        .filter((f) => f.endsWith(".sql"))
+        .sort()
+        .map((f) => [f, createHash("sha256").update(readFileSync(join(dir, f))).digest("hex").slice(0, 16)]),
+    );
+    // Add a line for each new migration; never change one.
+    expect(sums).toEqual({
+      "001_init.sql": "5f3162c089b08298",
+      "002_review_queue.sql": "9c538e6a51a7ca65",
+      "003_edition.sql": "671292e44235d372",
+      "004_lookup_jobs.sql": "018606fdcdee3dd5",
+      "005_http_calls.sql": "de6e60317691c408",
+      "006_aliases.sql": "d1396176e873a348",
+      "007_http_call_cost.sql": "1908ac0b6b072289",
+      "008_isbndb_records.sql": "4e87edd6eb818b3a",
+      "009_isbndb_covers.sql": "3e8b7c6b4ef09ae1",
+    });
+  });
+
+  test("a database left at an earlier version gets only the newer migrations, keeping its data", () => {
+    const dir = join(import.meta.dir, "../src/server/db/migrations");
+    const db = new Database(":memory:");
+    // As a database migrated before the cover columns existed (version 8), holding a kept record.
+    for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().slice(0, 8)) db.exec(readFileSync(join(dir, f), "utf8"));
+    db.exec("PRAGMA user_version = 8");
+    db.query("INSERT INTO isbndb_records (isbn13, record, via) VALUES ('9780441172719', '{}', 'bulk')").run();
+    expect(migrate(db)).toBe(1);
+    expect(db.query("SELECT isbn13, cover_state FROM isbndb_records").all()).toEqual([{ isbn13: "9780441172719", cover_state: null }]); // its cover is queued
+    expect(migrate(db)).toBe(0);
+    db.close();
   });
 });
 

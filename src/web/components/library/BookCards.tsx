@@ -34,7 +34,7 @@ export function FormatBadges({ book }: { book: BookSummaryDto }) {
 
 export function ConfirmedMark({ book }: { book: BookSummaryDto }) {
   if (!book.confirmedSource) return null;
-  const label = { openlibrary: "Confirmed from Open Library", doi: "Confirmed from DOI metadata", manual: "Edited manually" }[book.confirmedSource];
+  const label = { isbndb: "Confirmed from ISBNdb", openlibrary: "Confirmed from Open Library", doi: "Confirmed from DOI metadata", manual: "Edited manually" }[book.confirmedSource];
   return (
     <Tooltip label={`${label} — kept even if the files are removed`}>
       <IconCircleCheck size={16} color="var(--mantine-color-teal-6)" style={{ flexShrink: 0 }} aria-label={label} />

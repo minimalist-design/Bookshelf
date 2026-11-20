@@ -5,7 +5,7 @@ import type { BookRecord, BooksRepo, ConfirmedSource } from "../db/repo/books.ts
 import type { HashCacheRepo } from "../db/repo/hashCache.ts";
 import type { EventBus } from "../events.ts";
 import type { Extractor } from "../extract/index.ts";
-import { mergeMetadata, yearFrom } from "../extract/merge.ts";
+import { yearFrom } from "../extract/merge.ts";
 import { normalizeDate } from "../extract/text.ts";
 import type { Library } from "../library/library.ts";
 import { validateShelfName, ValidationError } from "../library/paths.ts";
@@ -15,7 +15,6 @@ import { toDisplayName } from "../naming/authors.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { detectFormat } from "../naming/formats.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
-import { parseFilename } from "../naming/parseFilename.ts";
 import type { BookActionResult, BookUpdate, BulkRenameResult, DeleteResult, MoveResult } from "../../shared/types.ts";
 import { ConflictError, NotFoundError } from "../api/http.ts";
 import { relocateIndexedFile } from "./fileOps.ts";
@@ -157,7 +156,7 @@ export class BookService {
     const abs = join(library.rootPath!, file.relPath);
     const detected = detectFormat(file.filename)!;
     const embedded = await extract(abs, detected.format);
-    const merged = mergeMetadata(embedded, parseFilename(file.filename), detected.stem);
+    const merged = library.linker.merge(embedded, library.linker.parse(file.filename), detected.stem);
 
     const newId = await library.linker.exclusive(() => {
       const current = library.index.get(file.relPath);

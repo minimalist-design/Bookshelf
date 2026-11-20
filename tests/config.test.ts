@@ -87,7 +87,7 @@ describe("config update", () => {
     const r = updateConfigFile(p);
     expect(r.oldVersion).toBe(0);
     expect(r.newVersion).toBe(CURRENT_VERSION);
-    expect(r.added.sort()).toEqual(["data_dir", "library_root", "max_upload_mb"]);
+    expect(r.added.sort()).toEqual(["data_dir", "isbndb_bulk_size", "isbndb_daily_limit", "isbndb_per_second", "library_root", "max_upload_mb"]);
     const out = JSON.parse(readFileSync(p, "utf8"));
     expect(out).toMatchObject({ version: CURRENT_VERSION, port: 8080, custom: "kept", host: "", max_upload_mb: 16384 });
     expect(updateConfigFile(p)).toMatchObject({ added: [], oldVersion: CURRENT_VERSION, newVersion: CURRENT_VERSION });

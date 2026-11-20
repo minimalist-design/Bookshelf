@@ -41,6 +41,7 @@ export interface LibraryDeps {
   extract: Extractor;
   events: EventBus;
   onLinkedNew?: LinkerDeps["onLinkedNew"];
+  canonicalize?: LinkerDeps["canonicalize"];
   /** Rows deleted by the retention rule (e.g. to remove cover files). */
   onBooksDeleted?: (bookIds: number[]) => void;
 }
@@ -91,6 +92,8 @@ export class Library {
       extract: deps.extract,
       index: this.index,
       onLinkedNew: deps.onLinkedNew,
+      canonicalize: deps.canonicalize,
+      isKnownAuthor: (name) => deps.books.hasAuthor(name),
     });
   }
 

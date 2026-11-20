@@ -92,6 +92,14 @@ describe("authors", () => {
     expect(toSortName("Ludwig van Beethoven")).toBe("van Beethoven, Ludwig");
     expect(toSortName("Martin Luther King Jr.")).toBe("King, Martin Luther, Jr.");
     expect(toSortName("Plato")).toBe("Plato");
+    // Surname then bare initials, as catalogues write them; a lone letter or a numeral stays.
+    expect(toDisplayName("Fokkinga M M")).toBe("M. M. Fokkinga");
+    expect(toDisplayName("Fokkinga, M M")).toBe("M. M. Fokkinga");
+    expect(toDisplayName("Le Guin U K")).toBe("U. K. Le Guin");
+    expect(toSortName("M. M. Fokkinga")).toBe("Fokkinga, M. M.");
+    expect(toDisplayName("Malcolm X")).toBe("Malcolm X");
+    expect(toDisplayName("Henry VIII")).toBe("Henry VIII");
+    expect(splitAuthors("Fokkinga M M")).toEqual(["M. M. Fokkinga"]);
   });
 
   test("filename author part", () => {
@@ -157,6 +165,16 @@ describe("parseFilename: import pattern", () => {
   });
 });
 
+describe("parseFilename: import pattern order", () => {
+  test("segments are swapped only when the first is clearly a name and the second clearly a title", () => {
+    expect(parseFilename("Brian W. Kernighan -- The C Programming Language.pdf")).toMatchObject({
+      title: "The C Programming Language",
+      authors: ["Brian W. Kernighan"],
+    });
+    expect(parseFilename("Jane Doe -- Emma.epub")).toMatchObject({ title: "Jane Doe", authors: ["Emma"] });
+  });
+});
+
 describe("parseFilename: library pattern", () => {
   test("with ISBN", () => {
     const p = parseFilename("Brian W. Kernighan & Dennis M. Ritchie - The C Programming Language [9780131103627].pdf");
@@ -177,6 +195,51 @@ describe("parseFilename: library pattern", () => {
     expect(parseFilename("Jane Austen - Emma.epub")).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
     expect(parseFilename("Jane Austen - Emma [Illustrated].epub").title).toBe("Emma [Illustrated]");
     expect(parseFilename("Unknown - Mystery.epub").authors).toEqual([]);
+  });
+
+  test("“Title - Author” is read the right way round", () => {
+    expect(parseFilename("A gentle introduction to category theory T - Fokkinga M M.pdf")).toMatchObject({
+      pattern: "library",
+      title: "A gentle introduction to category theory T",
+      authors: ["M. M. Fokkinga"],
+    });
+    expect(parseFilename("Pride and Prejudice - Jane Austen.epub")).toMatchObject({ title: "Pride and Prejudice", authors: ["Jane Austen"] });
+    expect(parseFilename("The Republic - Plato.epub")).toMatchObject({ title: "The Republic", authors: ["Plato"] });
+    expect(parseFilename("The C Programming Language - Brian W. Kernighan, Dennis M. Ritchie.pdf")).toMatchObject({
+      title: "The C Programming Language",
+      authors: ["Brian W. Kernighan", "Dennis M. Ritchie"],
+    });
+    expect(parseFilename("Mystery - Unknown.epub")).toMatchObject({ title: "Mystery", authors: [] });
+  });
+
+  test("the split falls at the ` - ` that leaves a person's name on one side", () => {
+    expect(parseFilename("Dune - Part One - Frank Herbert.epub")).toMatchObject({ title: "Dune - Part One", authors: ["Frank Herbert"] });
+    expect(parseFilename("Frank Herbert - Dune - Part One.epub")).toMatchObject({ title: "Dune - Part One", authors: ["Frank Herbert"] });
+  });
+
+  test("the app's order is kept when the names don't say, or when the name has an ID", () => {
+    expect(parseFilename("Plato - The Republic.epub")).toMatchObject({ title: "The Republic", authors: ["Plato"] });
+    expect(parseFilename("Emma - Jane Austen.epub")).toMatchObject({ title: "Jane Austen", authors: ["Emma"] }); // can't tell
+    expect(parseFilename("The Long Road - Jane Doe [9780131103627].epub")).toMatchObject({ title: "Jane Doe", authors: ["The Long Road"] });
+  });
+
+  test("a known author settles names the shapes can't", () => {
+    const known = (n: string) => n === "Jane Austen";
+    expect(parseFilename("Emma - Jane Austen.epub", { isKnownAuthor: known })).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
+    expect(parseFilename("Jane Austen - Emma.epub", { isKnownAuthor: known })).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
+    // A title stored as an author (an earlier mix-up) doesn't make a title read as a name.
+    const swapped = (n: string) => n === "A gentle introduction to category theory T";
+    expect(parseFilename("A gentle introduction to category theory T - Fokkinga M M.pdf", { isKnownAuthor: swapped }).title).toBe(
+      "A gentle introduction to category theory T",
+    );
+    const split = (n: string) => n === "Pride" || n === "Prejudice"; // "Pride and Prejudice" once stored as two authors
+    expect(parseFilename("Pride and Prejudice - Jane Austen.epub", { isKnownAuthor: split }).title).toBe("Pride and Prejudice");
+  });
+
+  test("all-lowercase and all-capitals names are judged by their words, not their case", () => {
+    expect(parseFilename("pride and prejudice - jane austen.epub")).toMatchObject({ title: "pride and prejudice", authors: ["jane austen"] });
+    expect(parseFilename("PRIDE AND PREJUDICE - JANE AUSTEN.epub")).toMatchObject({ title: "PRIDE AND PREJUDICE", authors: ["JANE AUSTEN"] });
+    expect(parseFilename("jane austen - emma.epub")).toMatchObject({ title: "emma", authors: ["jane austen"] });
   });
 
   test("plain filenames become the title", () => {

@@ -101,6 +101,7 @@ describe("sources (recorded responses)", () => {
     expect(paper.metadata.authors).toHaveLength(6);
     expect(paper.metadata.authors[0]).toBe("Maria Roussou");
     expect(paper.label).toContain("proceedings article");
+    expect(paper.workType).toBe("proceedings-article");
     expect(calls[0]!.url).toContain("mailto=me%40example.org");
     expect(calls[0]!.headers["user-agent"]).toContain("mailto:me@example.org");
 
@@ -227,6 +228,39 @@ describe("HTTP client", () => {
     expect(await paceOf("me@example.org", "api.crossref.org")).toBe(2200); // header: 1 per 2 s (+10 %)
   });
 
+  test("usage counts requests sent (not cache hits) per service, in the session and the last hour", async () => {
+    let n = 0;
+    const fetchImpl = (async (input: string | URL | Request) =>
+      String(input).includes("busy") && ++n === 1 ? new Response("", { status: 429, headers: { "retry-after": "600" } }) : Response.json({})) as typeof fetch;
+    const app = createApp(loadConfig({ data_dir: mkdtempSync(join(tmpdir(), "bookshelf-usage-")) }));
+    try {
+      const clock = fakeClock();
+      let email: string | null = null;
+      const http = new HttpClient(app.db, () => email, { fetchImpl, ...clock, maxWaitMs: 0 });
+      const start = clock.now();
+      await http.getJson("https://openlibrary.org/a.json");
+      await http.getJson("https://openlibrary.org/a.json"); // cached: not a call
+      await http.getJson("https://api.crossref.org/busy").catch(() => null); // a 429 is still a call
+      const byHost = () => Object.fromEntries(http.usage(start).services.map((s) => [s.host, s]));
+
+      let u = byHost();
+      expect(u["openlibrary.org"]).toMatchObject({ name: "Open Library", calls: 1, lastHour: 1, perSecond: 1, hourLimit: 3600, coolingDownUntil: null });
+      expect(u["api.crossref.org"]).toMatchObject({ calls: 1, lastHour: 1 });
+      expect(u["api.crossref.org"]!.coolingDownUntil).not.toBeNull();
+      expect(u["doi.org"]).toMatchObject({ calls: 0, perSecond: null, hourLimit: null });
+
+      email = "me@example.org";
+      clock.advance(2 * 60 * 60 * 1000);
+      u = byHost();
+      expect(u["openlibrary.org"]).toMatchObject({ calls: 1, lastHour: 0, perSecond: 3, hourLimit: 10_800 });
+      expect(http.usage(clock.now()).services.every((s) => s.calls === 0)).toBe(true);
+      expect(http.usage(start).identified).toBe(true);
+    } finally {
+      await app.library.close();
+      app.db.close();
+    }
+  });
+
   test("one request per host at a time; interactive requests go before queued background ones", async () => {
     const order: string[] = [];
     const fetchImpl = (async (input: string | URL | Request) => {
@@ -323,6 +357,28 @@ describe("lookup service", () => {
     expect(r.renamed[0]!.to).toBe("S/Ashish Vaswani et al. - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
   });
 
+  test("hand edits to the current values are applied with the candidate's fields, which win where both are given", async () => {
+    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    await app.library.open(root);
+    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    await app.bookService.update(id, { tags: ["scifi"], notes: "Signed copy" });
+    const found = await app.lookup.lookup(id);
+    expect(found.notes).toBe("Signed copy"); // local only: shown for editing, never compared
+    const c = found.candidates[0]!;
+
+    const r = await app.lookup.apply(id, {
+      candidate: c,
+      fields: ["pages", "publisher"],
+      cover: false,
+      // `publisher` is also taken from the candidate; `tags: []` clears a field, which candidate values never do.
+      edits: { subtitle: "Book One", series: "Dune", seriesIndex: 1, publisher: "Typed", tags: [], notes: "Signed, 1st printing", rating: 5 } as never,
+    });
+    expect(r.book).toMatchObject({ subtitle: "Book One", series: "Dune", seriesIndex: 1, publisher: "Ace", pages: 896, tags: [], notes: "Signed, 1st printing", rating: null, confirmedSource: "openlibrary" });
+
+    // Edits go through the same validation as the edit form.
+    await expect(app.lookup.apply(id, { candidate: c, fields: [], cover: false, edits: { title: "" } })).rejects.toThrow(ValidationError);
+  });
+
   test("cover picker: own edition, then every edition of the same work (book's language first), then other works", async () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
@@ -392,6 +448,32 @@ describe("lookup service", () => {
 
     app.lookup.removeFromQueue(mystery);
     expect(app.lookup.status().reviewCount).toBe(0);
+
+    expect(app.lookup.jobs([dune, mystery, 999])).toEqual({
+      [dune]: { state: "done", position: 0, error: null },
+      [mystery]: { state: "done", position: 0, error: null },
+      999: null,
+    });
+  });
+
+  test("a new run counts only its own books, while earlier jobs stay readable", async () => {
+    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Mystery -- Nobody.epub");
+    await app.library.open(root);
+    const dune = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const mystery = idOf("S/Mystery -- Nobody.epub");
+    app.lookup.enqueue([dune]);
+    await app.lookup.idle();
+    app.lookup.stop(); // hold the next run so its queue can be inspected
+    app.lookup.enqueue([mystery]);
+    expect(app.lookup.status()).toMatchObject({ running: true, pending: 1, done: 0 });
+    expect(app.lookup.jobs([dune, mystery])).toEqual({
+      [dune]: { state: "done", position: 0, error: null },
+      [mystery]: { state: "pending", position: 0, error: null },
+    });
+    // Queued again, a finished book goes to the back of the line.
+    app.lookup.enqueue([dune]);
+    expect(app.lookup.jobs([dune])[dune]).toEqual({ state: "pending", position: 1, error: null });
   });
 
   test("network failures are reported, not thrown; bulk counts them", async () => {

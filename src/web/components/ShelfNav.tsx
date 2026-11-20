@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { ActionIcon, Alert, Badge, Button, Code, Group, List, Loader, Menu, Modal, NavLink, ScrollArea, Stack, Text, TextInput, Tooltip } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconBooks, IconDots, IconEdit, IconFolder, IconFolderPlus, IconInbox, IconListCheck, IconTrash } from "@tabler/icons-react";
+import { IconBooks, IconDots, IconEdit, IconFolder, IconFolderPlus, IconInbox, IconListCheck, IconTrash, IconUpload } from "@tabler/icons-react";
 import { useMutation } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import type { ShelfDeleteConflict, ShelfDto } from "../../shared/types.ts";
 import { api, ApiRequestError } from "../api/client.ts";
 import { useInvalidateBooks, useLibraryStatus, useLookupStatus, useShelves } from "../api/hooks.ts";
+import { ACTIVE_STATES, useImportQueue } from "./ImportQueue.tsx";
 import { isBookDrag, readBookDrag } from "./library/dnd.ts";
 import { useBookActions } from "./library/useBookActions.ts";
 
@@ -26,6 +27,7 @@ export function ShelfNav({ onNavigate }: { onNavigate?: () => void }) {
   const [dialog, setDialog] = useState<Dialog>(null);
   const [dropTarget, setDropTarget] = useState<string | null | undefined>(undefined);
   const { move } = useBookActions();
+  const uploadsLeft = useImportQueue().items.filter((i) => ACTIVE_STATES.includes(i.state)).length;
 
   const dropProps = (shelf: string | null) => ({
     onDragOver: (e: React.DragEvent) => {
@@ -73,6 +75,21 @@ export function ShelfNav({ onNavigate }: { onNavigate?: () => void }) {
     <>
       {item("all", "All books", "/", current === undefined, <IconBooks size={18} />, status.data?.bookCount)}
       {item("unshelved", "Unshelved", shelfUrl(null), current === "", <IconInbox size={18} />, unshelved?.bookCount, null, null)}
+      <NavLink
+        component={Link}
+        to="/add"
+        label="Add books"
+        leftSection={<IconUpload size={18} />}
+        active={pathname === "/add"}
+        onClick={onNavigate}
+        rightSection={
+          uploadsLeft ? (
+            <Badge size="sm" variant="filled" color="blue">
+              {uploadsLeft}
+            </Badge>
+          ) : null
+        }
+      />
       {(lookup.data?.reviewCount || lookup.data?.running) ? (
         <NavLink
           component={Link}

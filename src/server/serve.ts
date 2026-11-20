@@ -70,6 +70,7 @@ app.library.open(root).catch((err) => console.error("Library scan failed:", err)
 
 const shutdown = async () => {
   app.lookup.stop(); // queued lookups resume on the next start
+  app.isbndbCovers.stop(); // so do cover downloads
   await app.library.close();
   app.db.close();
   process.exit(0);

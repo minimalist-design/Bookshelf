@@ -15,6 +15,17 @@ export interface SettingsDto {
   contactEmail: string | null;
   dataDir: string;
   tools: ExternalToolsStatus;
+  /** ISBNdb is used (an API key is set in the environment), with the limits from the config file. */
+  isbndb: { configured: boolean; dailyLimit: number; perSecond: number; bulkSize: number };
+}
+
+/** The plan behind the ISBNdb key and today's quota, as ISBNdb reports it. */
+export interface IsbndbKeyDto {
+  planName: string;
+  bulkLimit: number;
+  total: number;
+  spent: number;
+  left: number;
 }
 
 export interface SettingsUpdate {
@@ -43,7 +54,7 @@ export interface ApiError {
 // ---- Library ------------------------------------------------------------------
 
 export type BookFormat = "epub" | "pdf" | "cbz" | "cbr" | "djvu" | "fb2";
-export type ConfirmedSource = "openlibrary" | "doi" | "manual";
+export type ConfirmedSource = "isbndb" | "openlibrary" | "doi" | "manual";
 export type MetadataSource = "embedded" | "filename" | "mixed";
 
 export interface BookFileDto {
@@ -184,6 +195,8 @@ export interface ImportResultDto {
   relPath: string | null;
   shelf: string | null;
   message: string;
+  /** A metadata lookup was queued for the new book (`lookup=1` on upload). */
+  lookupQueued: boolean;
 }
 
 // ---- Editing ------------------------------------------------------------------
@@ -269,7 +282,8 @@ export interface DeleteResult {
 
 // ---- External metadata lookups ----------------------------------------------------
 
-export type LookupSource = "openlibrary" | "doi";
+export const LOOKUP_SOURCES = ["isbndb", "openlibrary", "doi"] as const;
+export type LookupSource = (typeof LOOKUP_SOURCES)[number];
 
 export const METADATA_FIELDS = [
   "title",
@@ -320,6 +334,10 @@ export interface MetadataCandidate {
   coverUrl: string | null;
   olEditionKey: string | null;
   olWorkKey: string | null;
+  /** DOI records only: the work's type as the registry gives it (Crossref `journal-article`, CSL `article-journal`, …). */
+  workType?: string | null;
+  /** Read from the kept copy of ISBNdb records: no call was made for it. */
+  kept?: boolean;
 }
 
 /** same: equal · fill: book is empty here · conflict: both differ · missing: candidate has nothing. */
@@ -338,6 +356,8 @@ export interface CandidateWithDiff extends MetadataCandidate {
 
 export interface LookupResult {
   bookId: number;
+  /** The book's own notes: local only, never part of a source's metadata, but editable while reviewing. */
+  notes: string | null;
   candidates: CandidateWithDiff[];
   /** Problems talking to a source (network errors etc.). */
   errors: string[];
@@ -372,6 +392,11 @@ export interface ApplyMetadataRequest {
   fields: MetadataField[];
   /** Download and use the candidate's cover. */
   cover: boolean;
+  /**
+   * Values typed into the "Current" column, for fields not taken from the candidate.
+   * Unlike candidate values, an edit can clear a field (`null`, or `[]` for lists).
+   */
+  edits?: Partial<Pick<BookUpdate, MetadataField | "notes">>;
 }
 
 export interface ReviewItemDto {
@@ -399,6 +424,47 @@ export interface LookupQueueStatus {
   waitingForLibrary: boolean;
   /** Rough time left for the pending books, from the pace of this run; null until known. */
   etaSeconds: number | null;
+  /** The book being looked up right now. */
+  currentBookId: number | null;
+}
+
+export type LookupJobState = "pending" | "done" | "no_match" | "failed";
+
+/** A book's bulk-lookup job; `position` is the number of pending jobs ahead of it. */
+export interface LookupJobDto {
+  state: LookupJobState;
+  position: number;
+  error: string | null;
+}
+
+/** Requests sent to one metadata service (cache hits are not counted). */
+export interface MetadataServiceUsage {
+  host: string;
+  name: string;
+  /** Since the `since` time of the request. */
+  calls: number;
+  lastHour: number;
+  /** Published limit (requests per second) for the current identification; null when none is published. */
+  perSecond: number | null;
+  hourLimit: number | null;
+  /** Set while the service is rate-limiting us (ISO time). */
+  coolingDownUntil: string | null;
+  /** Calls allowed per UTC day, for services with a daily quota (ISBNdb); null otherwise. */
+  dailyLimit: number | null;
+  /** Calls charged today (since 00:00 UTC) by our own count; a bulk call counts once per ISBN. */
+  today: number;
+  /** What the service last reported as left today (it also counts calls made elsewhere with the same key). */
+  reportedLeft: number | null;
+  /** When the daily quota resets (ISO time), for services with one. */
+  quotaResetsAt: string | null;
+}
+
+export interface MetadataUsageDto {
+  /** Server time (epoch ms); clients use it as their session start. */
+  now: number;
+  /** A contact email is set, which raises some limits. */
+  identified: boolean;
+  services: MetadataServiceUsage[];
 }
 
 // ---- Maintenance ----------------------------------------------------------------
@@ -417,6 +483,23 @@ export interface MissingBookDto {
   updatedAt: string;
 }
 
+/** An imported reference file (Settings › Reference data). */
+export interface ReferenceSourceDto {
+  source: string;
+  /** Display name, e.g. "Wikidata". */
+  name: string;
+  url: string | null;
+  /** Which state of the source the file reflects (e.g. the date its build started). */
+  version: string | null;
+  builtAt: string | null;
+  importedAt: string | null;
+  /** Language codes kept for names and titles, comma-separated; "*" for all. */
+  languages: string | null;
+  license: string | null;
+  counts: { authors: number; works: number; series: number; editions: number };
+  bytes: number;
+}
+
 export interface MaintenanceStats {
   booksOnDisk: number;
   filesOnDisk: number;
@@ -427,6 +510,11 @@ export interface MaintenanceStats {
   reviewQueue: number;
   hashCacheEntries: number;
   httpCacheEntries: number;
+  /** ISBNdb records kept for good (never cleared with the lookup cache). */
+  isbndbRecords: number;
+  /** Their cover images downloaded so far, and their size. */
+  isbndbCovers: number;
+  isbndbCoverBytes: number;
   coverFiles: number;
   coverBytes: number;
   orphanCoverFiles: number;
@@ -436,4 +524,120 @@ export interface MaintenanceStats {
 export interface CleanupResult {
   removedBooks: number;
   removedCoverFiles: number;
+}
+
+/** Books whose unconfirmed metadata the built-in metadata rules changed. */
+export interface MetadataRulesResult {
+  changed: number;
+}
+
+// ---- Name cleanup (merging spelling variants) ------------------------------------------
+
+export const CLEANUP_FIELDS = ["authors", "tags", "series", "publishers"] as const;
+export type CleanupField = (typeof CLEANUP_FIELDS)[number];
+
+/** How a variant relates to its group's main name, strongest first; `similar` = only through another variant. */
+export type NameMatchKind = "main" | "case" | "punctuation" | "typo" | "initials" | "similar";
+
+export interface NameVariantDto {
+  name: string;
+  /** Books on disk with this spelling. */
+  books: number;
+  match: NameMatchKind;
+  /** Ticked when the list first appears (the main name and safe matches). */
+  preselected: boolean;
+}
+
+export interface NameGroupDto {
+  /** The most used spelling, offered as the name to merge into. */
+  main: string;
+  /** The main name first, then the variants, strongest match first. */
+  variants: NameVariantDto[];
+}
+
+export interface NameGroupsDto {
+  field: CleanupField;
+  groups: NameGroupDto[];
+  /** Names without variants (authors only, so a lone badly written name can be renamed). */
+  singles: FacetDto[];
+}
+
+export interface NameMergeRequest {
+  field: CleanupField;
+  from: string[];
+  to: string;
+}
+
+export interface NameMergeResult {
+  /** Books whose metadata changed. */
+  books: number;
+  renamed: RenameResult[];
+  errors: string[];
+}
+
+/** A book listed by name, linking to its page. */
+export interface BookRefDto {
+  id: number;
+  title: string;
+  authors: string[];
+}
+
+/** A book whose title and authors look swapped (title reads as a person's name, authors as a title). */
+export interface SwapSuspectDto {
+  id: number;
+  title: string;
+  authors: string[];
+  /** Its files on disk, relative to the library. */
+  files: string[];
+  /** The suggested fix. */
+  proposed: { title: string; authors: string[] };
+  /** `filename`: its file's name, read again, gives the swapped fields; `swap`: the two fields exchanged. */
+  basis: "filename" | "swap";
+}
+
+export interface TitleAuthorFix {
+  id: number;
+  title: string;
+  authors: string[];
+}
+
+export interface TitleAuthorFixRequest {
+  items: TitleAuthorFix[];
+}
+
+/** Where author names are looked up: Wikidata first, Open Library as the fallback. */
+export type AuthorSource = "wikidata" | "openlibrary";
+
+/** An author record found by name, to merge spellings into its name. */
+export interface AuthorMatchDto {
+  source: AuthorSource;
+  /** Wikidata item ("Q36322") or Open Library author key ("OL21594A"). */
+  key: string;
+  name: string;
+  /** "1775–1817", or null when unknown. */
+  years: string | null;
+  /** Wikidata's short description ("English novelist"). */
+  description: string | null;
+  /** Open Library only. */
+  topWork: string | null;
+  workCount: number | null;
+  alternateNames: string[];
+  /** Library authority records for this person (Library of Congress, GND, VIAF…), Wikidata only. */
+  authorities: { name: string; url: string }[];
+  url: string;
+}
+
+export interface AuthorSearchDto {
+  /** The source the matches come from. */
+  source: AuthorSource;
+  matches: AuthorMatchDto[];
+  /** Why Open Library was used instead of Wikidata, if it was a fallback. */
+  note: string | null;
+}
+
+/** A remembered variant: new imports and lookups get `canonical` instead. */
+export interface AliasDto {
+  field: CleanupField;
+  variant: string;
+  canonical: string;
 }

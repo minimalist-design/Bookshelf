@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import { toSortName } from "../../naming/authors.ts";
 import type { BookFormat } from "../../naming/formats.ts";
 import type { BookMetadata, MetadataSource } from "../../metadata/types.ts";
+import type { CleanupField } from "../../../shared/types.ts";
 
-export type ConfirmedSource = "openlibrary" | "doi" | "manual";
+export type ConfirmedSource = "isbndb" | "openlibrary" | "doi" | "manual";
 
 export interface BookRecord extends BookMetadata {
   id: number;
@@ -294,6 +295,36 @@ export class BooksRepo {
       }
       this.pruneOrphans();
     })();
+  }
+
+  /** Whether some book (other than `exceptBookId`) has this author (any case). */
+  hasAuthor(name: string, exceptBookId: number | null = null): boolean {
+    return (
+      this.db
+        .query(
+          `SELECT 1 FROM authors a JOIN book_authors ba ON ba.author_id = a.id
+           WHERE a.name = ?1 COLLATE NOCASE AND (?2 IS NULL OR ba.book_id <> ?2) LIMIT 1`,
+        )
+        .get(name, exceptBookId) !== null
+    );
+  }
+
+  /** Every book row (on disk or not) with one of these authors, tags (any case), series or publishers. */
+  idsWithName(field: CleanupField, names: readonly string[]): number[] {
+    if (!names.length) return [];
+    const marks = names.map(() => "?").join(", ");
+    const sql = {
+      authors: `SELECT DISTINCT ba.book_id AS id FROM book_authors ba JOIN authors a ON a.id = ba.author_id WHERE a.name IN (${marks})`,
+      tags: `SELECT DISTINCT bt.book_id AS id FROM book_tags bt JOIN tags t ON t.id = bt.tag_id WHERE t.name IN (${marks})`,
+      series: `SELECT id FROM books WHERE series IN (${marks})`,
+      publishers: `SELECT id FROM books WHERE publisher IN (${marks})`,
+    }[field];
+    return (this.db.query(sql).all(...names) as { id: number }[]).map((r) => r.id);
+  }
+
+  /** Tags are unique regardless of case and keep their first spelling; this sets the spelling. */
+  setTagSpelling(name: string): void {
+    this.db.query("UPDATE tags SET name = ?1 WHERE name = ?1").run(name);
   }
 
   private setAuthors(bookId: number, names: readonly string[]): void {

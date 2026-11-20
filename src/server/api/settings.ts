@@ -17,6 +17,12 @@ export function getSettings(app: AppContext): SettingsDto {
       ddjvu: !!t.ddjvu,
       pdftoppm: !!t.pdftoppm,
     },
+    isbndb: {
+      configured: app.config.isbndb.apiKey !== null,
+      dailyLimit: app.config.isbndb.dailyLimit,
+      perSecond: app.config.isbndb.perSecond,
+      bulkSize: app.config.isbndb.bulkSize,
+    },
   };
 }
 

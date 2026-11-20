@@ -4,9 +4,23 @@ function clean(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-/** "Tolkien, J. R. R." → "J. R. R. Tolkien"; names without a comma are returned unchanged. */
+/**
+ * Surname followed by two or three bare initials, as library catalogues and some sites write them:
+ * "Fokkinga M M", "Fokkinga, M M". One letter alone is left as it is ("Malcolm X").
+ */
+const SURNAME_THEN_INITIALS = /^(\p{Lu}[\p{L}'’-]+(?: \p{Lu}[\p{L}'’-]+)?),? (\p{Lu}\.?(?: \p{Lu}\.?){1,2})$/u;
+
+/**
+ * "Tolkien, J. R. R." → "J. R. R. Tolkien" and "Fokkinga M M" → "M. M. Fokkinga";
+ * other names without a comma are returned unchanged.
+ */
 export function toDisplayName(name: string): string {
   const n = clean(name);
+  const initials = SURNAME_THEN_INITIALS.exec(n);
+  if (initials) {
+    const given = initials[2]!.split(" ").map((i) => (i.endsWith(".") ? i : `${i}.`)).join(" ");
+    return `${given} ${initials[1]}`;
+  }
   const parts = n.split(",").map(clean).filter(Boolean);
   if (parts.length === 2 && isSurname(parts[0]!) && isGivenNames(parts[1]!)) return `${parts[1]} ${parts[0]}`;
   return n;
