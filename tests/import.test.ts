@@ -1,39 +1,29 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { apiRoutes } from "../src/server/api/router.ts";
-import { createApp, type AppContext } from "../src/server/app.ts";
-import { loadConfig } from "../src/server/config.ts";
+import type { AppContext } from "../src/server/app.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import { listLibrary } from "../src/server/library/queries.ts";
-import { makeEpub, makePdf, makePng } from "./fixtures.ts";
+import { closeTestApp, FAST_LIBRARY, makeEpub, makePdf, makePng, scratchDir, testApp } from "./fixtures.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
 
-const FAST = { debounceMs: 30, stableMs: 80, graceMs: 300 };
 let tmp: string;
 let root: string;
 let app: AppContext;
 
 beforeEach(async () => {
-  tmp = mkdtempSync(join(tmpdir(), "bookshelf-import-"));
-  root = join(tmp, "library");
-  mkdirSync(join(root, "Fiction"), { recursive: true });
-  mkdirSync(join(root, "Science"), { recursive: true });
-  app = createApp(loadConfig({ data_dir: join(tmp, "data"), max_upload_mb: 1 }), { library: FAST });
+  ({ tmp, root } = scratchDir("import", ["Fiction", "Science"]));
+  app = testApp(tmp, { max_upload_mb: 1 });
   await app.library.open(root);
 });
 
-afterEach(async () => {
-  app.lookup.stop();
-  await app.library.close();
-  app.db.close();
-  rmSync(tmp, { recursive: true, force: true });
-});
+afterEach(() => closeTestApp(app, tmp));
 
 const stream = (data: Uint8Array | string) => new Response(new Blob([data as BlobPart])).body;
 const upload = (data: Uint8Array | string, name: string, shelf: string | null = null) =>
   app.importer.importStream(stream(data), name, shelf);
-const books = () => listLibrary(app.library.index, app.books, {}).items;
+const books = () => listLibrary(app.library.index, app.db, {}).items;
 const incomingEmpty = () => !existsSync(join(root, ".bookshelf-incoming"));
 
 async function epub(title: string, authors: string[], isbn?: string, withCover = true) {
@@ -51,7 +41,7 @@ describe("import", () => {
     expect(r).toMatchObject({ status: "imported", title: "Dune", authors: ["Frank Herbert"], shelf: "Fiction", format: "epub" });
     expect(r.relPath).toBe("Fiction/Frank Herbert - Dune [9780441172719].epub");
     expect(existsSync(join(root, r.relPath!))).toBe(true);
-    expect(app.books.get(r.bookId)!.hasCover).toBe(true);
+    expect(bookRepo.get(app.db, r.bookId)!.hasCover).toBe(true);
     expect(incomingEmpty()).toBe(true);
   });
 
@@ -59,7 +49,7 @@ describe("import", () => {
     const r = await upload(makePdf(), "Attention Is All You Need -- Vaswani, Ashish; Shazeer, Noam; Parmar, Niki -- doi 10.48550_arXiv.1706.03762.PDF", null);
     expect(r.status).toBe("imported");
     expect(r.relPath).toBe("Ashish Vaswani et al. - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
-    expect(app.books.get(r.bookId)).toMatchObject({ doi: "10.48550/arXiv.1706.03762", authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"] });
+    expect(bookRepo.get(app.db, r.bookId)).toMatchObject({ doi: "10.48550/arXiv.1706.03762", authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"] });
   });
 
   test("exact duplicate is rejected and nothing is written", async () => {
@@ -94,8 +84,8 @@ describe("import", () => {
     const first = await upload(data, "a.epub", "Fiction");
     app.db.query("UPDATE books SET confirmed_source = 'openlibrary', title = 'Dune (verified)' WHERE id = ?").run(first.bookId);
     rmSync(join(root, first.relPath!));
-    await Bun.sleep(FAST.graceMs + 300);
-    expect(app.books.exists(first.bookId)).toBe(true);
+    await Bun.sleep(FAST_LIBRARY.graceMs + 300);
+    expect(bookRepo.exists(app.db, first.bookId)).toBe(true);
     expect(books()).toHaveLength(0);
 
     const again = await upload(data, "again.epub", "Science");
@@ -103,7 +93,7 @@ describe("import", () => {
     expect(again.relPath).toBe("Science/Frank Herbert - Dune (verified) [9780441172719].epub");
 
     rmSync(join(root, again.relPath!));
-    await Bun.sleep(FAST.graceMs + 300);
+    await Bun.sleep(FAST_LIBRARY.graceMs + 300);
     const byId = await upload(makePdf({ info: { Keywords: "ISBN 9780441172719" } }), "other.pdf", "Fiction");
     expect(byId).toMatchObject({ status: "reconnected", bookId: first.bookId, shelf: "Fiction" });
   });
@@ -132,7 +122,7 @@ describe("import", () => {
     await upload(makePdf(), "Paper -- Someone.pdf", "Science");
     await Bun.sleep(600);
     expect(app.library.index.size).toBe(2);
-    expect(app.books.count()).toBe(2);
+    expect(bookRepo.count(app.db)).toBe(2);
   });
 
   test("validation: unsupported type, unknown or invalid shelf, empty file, size limit", async () => {

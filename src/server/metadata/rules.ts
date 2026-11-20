@@ -43,7 +43,7 @@ function seriesFromTag<M extends RuleFields>(m: M, action: NonNullable<MetadataR
   return same ? m : { ...m, series: action.series, seriesIndex: Number.isFinite(index) ? index : null, tags };
 }
 
-function stripDescription<M extends RuleFields>(m: M, patterns: RegExp[]): M {
+function stripDescription<M extends RuleFields>(m: M, patterns: readonly RegExp[]): M {
   if (!m.description) return m;
   const stripped = patterns.reduce((text, p) => text.replace(p, " "), m.description);
   if (stripped === m.description) return m;

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,7 +13,7 @@ import {
   setMeta,
   storeRawResponse,
 } from "../src/server/reference/format.ts";
-import { ReferenceStore } from "../src/server/reference/store.ts";
+import * as referenceStore from "../src/server/reference/store.ts";
 import { apiRoutes } from "../src/server/api/router.ts";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
@@ -30,7 +30,8 @@ import {
   type Entity,
   type Statement,
 } from "../scripts/wikidata/wikidata.ts";
-import { BUILD_SCHEMA, normalize } from "../scripts/wikidata/build.ts";
+import { BUILD_SCHEMA, classifyAnswer, normalize, retryWaitSeconds } from "../scripts/wikidata/build.ts";
+import { mergeRows as mergeEntityRows } from "../scripts/wikidata/wikidata.ts";
 
 // ---------------------------------------------------------------- Wikidata JSON fixtures
 
@@ -295,48 +296,49 @@ function referenceFile(path: string, source = "wikidata", complete = true): stri
 
 describe("reference store", () => {
   let dir: string;
-  let store: ReferenceStore;
+  let refDir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "bookshelf-refstore-"));
-    store = new ReferenceStore(join(dir, "data"), 1024 * 1024 * 1024);
+    refDir = join(dir, "data/reference");
+    mkdirSync(refDir, { recursive: true });
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   test("a file on the server is copied in under its source's name and listed with its counts; the original stays", async () => {
     const original = referenceFile(join(dir, "built.sqlite"));
-    const s = await store.importFile(original);
+    const s = await referenceStore.importFile(refDir, original);
     expect(s).toMatchObject({ source: "wikidata", name: "Wikidata", version: "2026-11-20", languages: "en,ru", license: null });
     expect(s.counts).toEqual({ authors: 2, works: 1, series: 0, editions: 1 });
-    expect(store.list().map((x) => x.source)).toEqual(["wikidata"]);
-    expect(store.pathOf("wikidata")).toBe(join(dir, "data/reference/wikidata.sqlite"));
+    expect(referenceStore.list(refDir).map((x) => x.source)).toEqual(["wikidata"]);
+    expect(referenceStore.pathOf(refDir, "wikidata")).toBe(join(dir, "data/reference/wikidata.sqlite"));
     expect(readFileSync(original).byteLength).toBeGreaterThan(0);
   });
 
   test("a newer file of the same source replaces the old one; other sources sit next to it", async () => {
-    await store.importFile(referenceFile(join(dir, "a.sqlite")));
+    await referenceStore.importFile(refDir, referenceFile(join(dir, "a.sqlite")));
     const newer = referenceFile(join(dir, "b.sqlite"));
     const db = new Database(newer);
     setMeta(db, { source_version: "2026-12-01" });
     db.close();
-    await store.importFile(newer);
-    await store.importFile(referenceFile(join(dir, "c.sqlite"), "openlibrary"));
-    expect(store.list().map((s) => `${s.source} ${s.version}`)).toEqual(["openlibrary 2026-11-20", "wikidata 2026-12-01"]);
-    store.remove("openlibrary");
-    expect(store.list().map((s) => s.source)).toEqual(["wikidata"]);
-    expect(() => store.remove("openlibrary")).toThrow("No reference data from openlibrary");
+    await referenceStore.importFile(refDir, newer);
+    await referenceStore.importFile(refDir, referenceFile(join(dir, "c.sqlite"), "openlibrary"));
+    expect(referenceStore.list(refDir).map((s) => `${s.source} ${s.version}`)).toEqual(["openlibrary 2026-11-20", "wikidata 2026-12-01"]);
+    referenceStore.remove(refDir, "openlibrary");
+    expect(referenceStore.list(refDir).map((s) => s.source)).toEqual(["wikidata"]);
+    expect(() => referenceStore.remove(refDir, "openlibrary")).toThrow("No reference data from openlibrary");
   });
 
   test("unfinished builds and files that aren't reference files are refused, and nothing is left behind", async () => {
-    await expect(store.importFile(referenceFile(join(dir, "partial.sqlite"), "wikidata", false))).rejects.toThrow("hasn't finished");
+    await expect(referenceStore.importFile(refDir, referenceFile(join(dir, "partial.sqlite"), "wikidata", false))).rejects.toThrow("hasn't finished");
     writeFileSync(join(dir, "notes.sqlite"), "just text, not a database at all".repeat(50));
-    await expect(store.importFile(join(dir, "notes.sqlite"))).rejects.toThrow("Not a SQLite database");
+    await expect(referenceStore.importFile(refDir, join(dir, "notes.sqlite"))).rejects.toThrow("Not a SQLite database");
     const other = new Database(join(dir, "other.sqlite"));
     other.exec("CREATE TABLE t (x)");
     other.close();
-    await expect(store.importFile(join(dir, "other.sqlite"))).rejects.toThrow("no meta table");
-    await expect(store.importFile(join(dir, "nope.sqlite"))).rejects.toThrow("No such file");
-    expect(store.list()).toEqual([]);
-    expect(readdirSync(store.dir)).toEqual([]);
+    await expect(referenceStore.importFile(refDir, join(dir, "other.sqlite"))).rejects.toThrow("no meta table");
+    await expect(referenceStore.importFile(refDir, join(dir, "nope.sqlite"))).rejects.toThrow("No such file");
+    expect(referenceStore.list(refDir)).toEqual([]);
+    expect(readdirSync(refDir)).toEqual([]);
   });
 });
 
@@ -383,5 +385,23 @@ describe("reference API", () => {
     const tooBig = await fetch(`${server.url}api/reference?name=big.sqlite`, { method: "POST", body: big });
     expect(tooBig.status).toBe(400);
     expect(((await tooBig.json()) as { error: string }).error).toContain("import it from a path on the server");
+  });
+});
+
+describe("Wikidata build: retries and rows", () => {
+  test("answers: success, temporary problems worth retrying, and the rest", () => {
+    expect(classifyAnswer(200, "{}", null)).toMatchObject({ kind: "ok", body: "{}" });
+    expect(classifyAnswer(200, '{"error":{"code":"maxlag","info":"…"}}', "5")).toEqual({ kind: "retry", problem: "servers busy (maxlag)", retryAfterS: 5 });
+    expect(classifyAnswer(429, "", null)).toEqual({ kind: "retry", problem: "HTTP 429", retryAfterS: null });
+    expect(classifyAnswer(503, "", "30")).toEqual({ kind: "retry", problem: "HTTP 503", retryAfterS: 30 });
+    expect(classifyAnswer(404, "", null)).toBeNull();
+    expect([1, 2, 8, 9].map((a) => retryWaitSeconds(null, a))).toEqual([2, 4, 256, 300]);
+    expect(retryWaitSeconds(7, 9)).toBe(7);
+  });
+
+  test("rows of several entities are concatenated per table, in order", () => {
+    const a = { authors: [{ id: "Q1" }], works: [{ id: "Q10" }] } as never;
+    const b = { authors: [{ id: "Q2" }], series: [{ id: "Q20" }] } as never;
+    expect(mergeEntityRows([a, b])).toEqual({ authors: [{ id: "Q1" }, { id: "Q2" }], works: [{ id: "Q10" }], series: [{ id: "Q20" }] } as never);
   });
 });

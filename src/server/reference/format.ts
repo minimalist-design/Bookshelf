@@ -167,7 +167,12 @@ export function createReferenceSchema(db: Database, meta: { source: string } & R
 export function setMeta(db: Database, entries: Record<string, string | null>): void {
   const put = db.query("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
   const del = db.query("DELETE FROM meta WHERE key = ?");
-  db.transaction(() => Object.entries(entries).forEach(([k, v]) => (v === null ? del.run(k) : put.run(k, v))))();
+  db.transaction(() => {
+    for (const [k, v] of Object.entries(entries)) {
+      if (v === null) del.run(k);
+      else put.run(k, v);
+    }
+  })();
 }
 
 export function readMeta(db: Database): Record<string, string> {

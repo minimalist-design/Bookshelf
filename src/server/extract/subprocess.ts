@@ -4,8 +4,8 @@ export interface RunResult {
 }
 
 /** Run a command with a timeout; never throws for non-zero exits (check exitCode). */
-export async function run(cmd: string[], timeoutMs = 30_000, maxBytes = 64 * 1024 * 1024): Promise<RunResult> {
-  const proc = Bun.spawn({ cmd, stdout: "pipe", stderr: "ignore", stdin: "ignore", timeout: timeoutMs });
+export async function run(cmd: readonly string[], timeoutMs = 30_000, maxBytes = 64 * 1024 * 1024): Promise<RunResult> {
+  const proc = Bun.spawn({ cmd: [...cmd], stdout: "pipe", stderr: "ignore", stdin: "ignore", timeout: timeoutMs });
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of proc.stdout) {
@@ -28,7 +28,7 @@ export async function run(cmd: string[], timeoutMs = 30_000, maxBytes = 64 * 102
   return { stdout, exitCode };
 }
 
-export async function runText(cmd: string[], timeoutMs = 30_000): Promise<string | null> {
+export async function runText(cmd: readonly string[], timeoutMs = 30_000): Promise<string | null> {
   const r = await run(cmd, timeoutMs, 16 * 1024 * 1024);
   return r.exitCode === 0 ? new TextDecoder().decode(r.stdout) : null;
 }

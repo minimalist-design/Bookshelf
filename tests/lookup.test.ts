@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { apiRoutes } from "../src/server/api/router.ts";
@@ -7,11 +7,14 @@ import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import { lookupDoi } from "../src/server/sources/doi.ts";
-import { HttpClient, RateLimitedError } from "../src/server/sources/http.ts";
+import { createHttpClient, RateLimitedError } from "../src/server/sources/http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate, parseSeries } from "../src/server/sources/normalize.ts";
 import { openLibraryByIsbn, openLibrarySearch } from "../src/server/sources/openlibrary.ts";
 import type { MetadataCandidate } from "../src/shared/types.ts";
-import { makeJpeg } from "./fixtures.ts";
+import { closeTestApp, makeJpeg, scratchDir, testApp } from "./fixtures.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
+import * as lookups from "../src/server/services/lookup/lookup.ts";
+import * as books from "../src/server/services/books.ts";
 
 const FIX = join(import.meta.dir, "fixtures/http");
 const fixture = (name: string) => readFileSync(join(FIX, name), "utf8");
@@ -73,7 +76,7 @@ describe("normalization", () => {
 describe("sources (recorded responses)", () => {
   test("Open Library by ISBN: edition + edition record + work", async () => {
     const { fetchImpl, calls } = await fakeNetwork();
-    const http = new HttpClient(null, () => null, { fetchImpl, sleep: noSleep });
+    const http = createHttpClient(null, () => null, { fetchImpl, sleep: noSleep });
     const c = (await openLibraryByIsbn(http, "9780441172719"))!;
     expect(c).toMatchObject({ source: "openlibrary", match: "isbn", olEditionKey: "OL59726263M", olWorkKey: "OL893414W", coverUrl: "https://covers.openlibrary.org/b/id/15110282-L.jpg" });
     expect(c.metadata).toMatchObject({ title: "Dune", authors: ["Frank Herbert"], isbn13: "9780441172719", publisher: "Ace", edition: "91st printing", publishedDate: "2020", pages: 896, language: "en" });
@@ -86,7 +89,7 @@ describe("sources (recorded responses)", () => {
 
   test("Open Library search gives work-level candidates without ISBN", async () => {
     const { fetchImpl, calls } = await fakeNetwork();
-    const http = new HttpClient(null, () => null, { fetchImpl, sleep: noSleep });
+    const http = createHttpClient(null, () => null, { fetchImpl, sleep: noSleep });
     const list = await openLibrarySearch(http, { title: "dune", author: "herbert" });
     expect(list.length).toBeGreaterThan(0);
     expect(list[0]).toMatchObject({ match: "search", olWorkKey: "OL893414W", metadata: { title: "Dune", authors: ["Frank Herbert"], isbn13: null, publishedDate: "1965" } });
@@ -95,7 +98,7 @@ describe("sources (recorded responses)", () => {
 
   test("DOI: Crossref, then doi.org CSL for DataCite DOIs; book's DOI spelling kept", async () => {
     const { fetchImpl, calls } = await fakeNetwork();
-    const http = new HttpClient(null, () => "me@example.org", { fetchImpl, sleep: noSleep });
+    const http = createHttpClient(null, () => "me@example.org", { fetchImpl, sleep: noSleep });
     const paper = (await lookupDoi(http, "10.1145/3290605.3300857"))!;
     expect(paper.metadata).toMatchObject({ title: "Transformation through Provocation?", publisher: "ACM", publishedDate: "2019-05-02", doi: "10.1145/3290605.3300857" });
     expect(paper.metadata.authors).toHaveLength(6);
@@ -115,7 +118,7 @@ describe("sources (recorded responses)", () => {
 
   test("DOI with underscores from a filename: the all-slashes spelling is retried", async () => {
     const { fetchImpl, calls } = await fakeNetwork();
-    const http = new HttpClient(null, () => null, { fetchImpl, sleep: noSleep });
+    const http = createHttpClient(null, () => null, { fetchImpl, sleep: noSleep });
     // The fake serves a recorded work for the all-slashes spelling only.
     expect((await lookupDoi(http, "10.1093/ajae_aaq063"))!.metadata.title).toBe("Transformation through Provocation?");
     expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
@@ -153,7 +156,7 @@ describe("HTTP client", () => {
     const app = createApp(loadConfig({ data_dir: mkdtempSync(join(tmpdir(), "bookshelf-http-")) }));
     try {
       const clock = fakeClock();
-      const http = new HttpClient(app.db, () => null, { fetchImpl, ...clock, minIntervalMs: 500 });
+      const http = createHttpClient(app.db, () => null, { fetchImpl, ...clock, minIntervalMs: 500 });
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 });
       expect(clock.waits).toContain(2000);
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 }); // cached
@@ -176,7 +179,7 @@ describe("HTTP client", () => {
       return Response.json({ ok: true });
     }) as typeof fetch;
     const clock = fakeClock();
-    const http = new HttpClient(null, () => null, { fetchImpl, ...clock });
+    const http = createHttpClient(null, () => null, { fetchImpl, ...clock });
 
     const err = await http.getJson("https://a.test/1").catch((e) => e);
     expect(err).toBeInstanceOf(RateLimitedError);
@@ -198,7 +201,7 @@ describe("HTTP client", () => {
     let limited = true;
     const fetchImpl = (async () => (limited ? new Response("", { status: 429 }) : Response.json({}))) as unknown as typeof fetch;
     const clock = fakeClock();
-    const http = new HttpClient(null, () => null, { fetchImpl, ...clock, maxWaitMs: 0 });
+    const http = createHttpClient(null, () => null, { fetchImpl, ...clock, maxWaitMs: 0 });
     const retryIn = async (url: string) => ((await http.getJson(url).catch((e) => e)) as RateLimitedError).retryAt - clock.now();
     expect(await retryIn("https://a.test/1")).toBe(60_000);
     clock.advance(60_000);
@@ -218,7 +221,7 @@ describe("HTTP client", () => {
         : Response.json({})) as typeof fetch;
     const paceOf = async (email: string | null, host: string) => {
       const clock = fakeClock();
-      const http = new HttpClient(null, () => email, { fetchImpl, ...clock });
+      const http = createHttpClient(null, () => email, { fetchImpl, ...clock });
       await http.getJson(`https://${host}/1`);
       await http.getJson(`https://${host}/2`);
       return clock.waits.at(-1);
@@ -236,7 +239,7 @@ describe("HTTP client", () => {
     try {
       const clock = fakeClock();
       let email: string | null = null;
-      const http = new HttpClient(app.db, () => email, { fetchImpl, ...clock, maxWaitMs: 0 });
+      const http = createHttpClient(app.db, () => email, { fetchImpl, ...clock, maxWaitMs: 0 });
       const start = clock.now();
       await http.getJson("https://openlibrary.org/a.json");
       await http.getJson("https://openlibrary.org/a.json"); // cached: not a call
@@ -268,7 +271,7 @@ describe("HTTP client", () => {
       await Bun.sleep(5);
       return Response.json({});
     }) as typeof fetch;
-    const http = new HttpClient(null, () => null, { fetchImpl, ...fakeClock() });
+    const http = createHttpClient(null, () => null, { fetchImpl, ...fakeClock() });
     const bulk = ["/a", "/b", "/c"].map((p) => http.background(() => http.getJson(`https://x.test${p}`)));
     const user = http.getJson("https://x.test/user");
     await Promise.all([...bulk, user]);
@@ -283,23 +286,12 @@ describe("lookup service", () => {
   let calls: Call[];
 
   beforeEach(async () => {
-    tmp = mkdtempSync(join(tmpdir(), "bookshelf-lookup-"));
-    root = join(tmp, "library");
-    mkdirSync(join(root, "S"), { recursive: true });
+    ({ tmp, root } = scratchDir("lookup", ["S"]));
     const net = await fakeNetwork();
     calls = net.calls;
-    app = createApp(loadConfig({ data_dir: join(tmp, "data") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
-      http: { fetchImpl: net.fetchImpl, sleep: noSleep },
-    });
+    app = testApp(tmp, {}, { http: { fetchImpl: net.fetchImpl, sleep: noSleep } });
   });
-  afterEach(async () => {
-    app.lookup.stop();
-    await app.lookup.idle();
-    await app.library.close();
-    app.db.close();
-    rmSync(tmp, { recursive: true, force: true });
-  });
+  afterEach(() => closeTestApp(app, tmp));
 
   const put = (rel: string, content = rel) => writeFileSync(join(root, rel), content);
   const idOf = (rel: string) => app.library.index.get(rel)!.bookId;
@@ -309,21 +301,21 @@ describe("lookup service", () => {
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
 
-    const r = await app.lookup.lookup(id);
+    const r = await lookups.find(app, id);
     expect(r.errors).toEqual([]);
     expect(r.candidates).toHaveLength(1);
     const c = r.candidates[0]!;
     const status = Object.fromEntries(c.diff.map((d) => [d.field, d.status]));
     expect(status).toMatchObject({ title: "same", authors: "same", isbn13: "same", publisher: "fill", edition: "fill", pages: "fill", language: "fill", description: "fill", doi: "missing" });
 
-    const applied = await app.lookup.apply(id, { candidate: c, fields: ["publisher", "edition", "pages", "language", "description", "doi"], cover: true });
+    const applied = await lookups.apply(app, id, { candidate: c, fields: ["publisher", "edition", "pages", "language", "description", "doi"], cover: true });
     expect(applied.book).toMatchObject({ publisher: "Ace", edition: "91st printing", pages: 896, language: "en", confirmedSource: "openlibrary", olEditionKey: "OL59726263M", olWorkKey: "OL893414W", hasCover: true });
     expect(applied.renamed).toEqual([]);
-    expect(app.books.get(id)!.coverSource).toBe("openlibrary");
+    expect(bookRepo.get(app.db, id)!.coverSource).toBe("openlibrary");
     expect(calls.some((x) => x.url.includes("covers.openlibrary.org") && x.url.includes("default=false"))).toBe(true);
 
     // A second lookup now shows those fields as equal.
-    const again = await app.lookup.lookup(id);
+    const again = await lookups.find(app, id);
     expect(again.candidates[0]!.diff.find((d) => d.field === "publisher")!.status).toBe("same");
   });
 
@@ -331,13 +323,13 @@ describe("lookup service", () => {
     put("S/Dune -- Frank Herbert.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert.epub");
-    const r = await app.lookup.lookup(id);
+    const r = await lookups.find(app, id);
     expect(r.candidates.every((c) => c.match === "search")).toBe(true);
     expect(new Set(r.candidates.map((c) => c.source))).toEqual(new Set(["openlibrary", "doi"]));
 
-    const typed = await app.lookup.lookup(id, { q: "978-0-441-17271-9" });
+    const typed = await lookups.find(app, id, { q: "978-0-441-17271-9" });
     expect(typed.candidates.map((c) => c.match)).toEqual(["isbn"]);
-    const onlyOl = await app.lookup.lookup(id, { source: "openlibrary" });
+    const onlyOl = await lookups.find(app, id, { source: "openlibrary" });
     expect(onlyOl.candidates.every((c) => c.source === "openlibrary")).toBe(true);
   });
 
@@ -345,13 +337,13 @@ describe("lookup service", () => {
     put("S/Some Paper -- Someone -- doi 10.48550_arXiv.1706.03762.pdf");
     await app.library.open(root);
     const id = idOf("S/Some Paper -- Someone -- doi 10.48550_arXiv.1706.03762.pdf");
-    const c = (await app.lookup.lookup(id)).candidates[0]!;
+    const c = (await lookups.find(app, id)).candidates[0]!;
     expect(c.match).toBe("doi");
 
     const evil: MetadataCandidate = { ...c, coverUrl: "https://evil.example/x.jpg" };
-    await expect(app.lookup.apply(id, { candidate: evil, fields: ["title"], cover: true })).rejects.toThrow(ValidationError);
+    await expect(lookups.apply(app, id, { candidate: evil, fields: ["title"], cover: true })).rejects.toThrow(ValidationError);
 
-    const r = await app.lookup.apply(id, { candidate: c, fields: ["title", "authors", "isbn13", "description"], cover: false });
+    const r = await lookups.apply(app, id, { candidate: c, fields: ["title", "authors", "isbn13", "description"], cover: false });
     expect(r.book).toMatchObject({ title: "Attention Is All You Need", confirmedSource: "doi", isbn13: null });
     expect(r.book.authors).toHaveLength(8);
     expect(r.renamed[0]!.to).toBe("S/Ashish Vaswani et al. - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
@@ -361,12 +353,12 @@ describe("lookup service", () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    await app.bookService.update(id, { tags: ["scifi"], notes: "Signed copy" });
-    const found = await app.lookup.lookup(id);
+    await books.update(app, id, { tags: ["scifi"], notes: "Signed copy" });
+    const found = await lookups.find(app, id);
     expect(found.notes).toBe("Signed copy"); // local only: shown for editing, never compared
     const c = found.candidates[0]!;
 
-    const r = await app.lookup.apply(id, {
+    const r = await lookups.apply(app, id, {
       candidate: c,
       fields: ["pages", "publisher"],
       cover: false,
@@ -376,16 +368,16 @@ describe("lookup service", () => {
     expect(r.book).toMatchObject({ subtitle: "Book One", series: "Dune", seriesIndex: 1, publisher: "Ace", pages: 896, tags: [], notes: "Signed, 1st printing", rating: null, confirmedSource: "openlibrary" });
 
     // Edits go through the same validation as the edit form.
-    await expect(app.lookup.apply(id, { candidate: c, fields: [], cover: false, edits: { title: "" } })).rejects.toThrow(ValidationError);
+    await expect(lookups.apply(app, id, { candidate: c, fields: [], cover: false, edits: { title: "" } })).rejects.toThrow(ValidationError);
   });
 
   test("cover picker: own edition, then every edition of the same work (book's language first), then other works", async () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    await app.bookService.update(id, { language: "en" });
+    await books.update(app, id, { language: "en" });
 
-    const r = await app.lookup.findCovers(id);
+    const r = await lookups.findCovers(app, id);
     expect(r.errors).toEqual([]);
     const ids = r.options.map((o) => /\/b\/id\/(\d+)-L/.exec(o.coverUrl)![1]);
     expect(ids).toEqual([
@@ -403,22 +395,22 @@ describe("lookup service", () => {
 
     // A typed ISBN starts from that edition: no title search, but still all editions of its work.
     calls.length = 0;
-    const typed = await app.lookup.findCovers(id, "978-0-441-17271-9");
+    const typed = await lookups.findCovers(app, id, "978-0-441-17271-9");
     expect(typed.options.length).toBe(6);
     expect(calls.some((x) => x.url.includes("search.json"))).toBe(false);
 
     // Free text replaces the search; the first result's title picks the work to expand.
-    const searched = await app.lookup.findCovers(id, "dune herbert");
+    const searched = await lookups.findCovers(app, id, "dune herbert");
     expect(searched.options.length).toBe(8);
     expect(searched.options.some((o) => o.thisEdition)).toBe(true); // marked by ISBN among the editions
 
-    await expect(app.lookup.setCoverFromUrl(id, "https://evil.example/x.jpg")).rejects.toThrow(ValidationError);
-    await expect(app.lookup.setCoverFromUrl(id, 42)).rejects.toThrow(ValidationError);
+    await expect(lookups.setCoverFromUrl(app, id, "https://evil.example/x.jpg")).rejects.toThrow(ValidationError);
+    await expect(lookups.setCoverFromUrl(app, id, 42)).rejects.toThrow(ValidationError);
 
-    const before = app.books.get(id)!.updatedAt;
+    const before = bookRepo.get(app.db, id)!.updatedAt;
     await Bun.sleep(5);
-    await app.lookup.setCoverFromUrl(id, r.options[0]!.coverUrl);
-    const after = app.books.get(id)!;
+    await lookups.setCoverFromUrl(app, id, r.options[0]!.coverUrl);
+    const after = bookRepo.get(app.db, id)!;
     expect(after.updatedAt).not.toBe(before); // the UI's cover cache-buster
     expect(after).toMatchObject({ hasCover: true, coverSource: "openlibrary", confirmedSource: "manual", publisher: null, pages: null });
   });
@@ -437,16 +429,16 @@ describe("lookup service", () => {
     expect(app.lookup.status()).toMatchObject({ running: false, pending: 0, done: 2, reviewCount: 2 });
     expect(events.length).toBeGreaterThan(0);
 
-    const queue = app.lookup.reviewQueue();
+    const queue = lookups.reviewItems(app);
     expect(queue.map((q) => q.book.id).sort()).toEqual([dune, mystery].sort());
 
-    const res = await app.lookup.acceptAllFills();
+    const res = await lookups.acceptAllFills(app);
     expect(res).toEqual({ applied: 1, skipped: 1, errors: [] });
-    expect(app.books.get(dune)).toMatchObject({ publisher: "Ace", confirmedSource: "openlibrary", hasCover: true });
-    expect(app.books.get(mystery)!.confirmedSource).toBeNull();
-    expect(app.lookup.reviewQueue().map((q) => q.book.id)).toEqual([mystery]);
+    expect(bookRepo.get(app.db, dune)).toMatchObject({ publisher: "Ace", confirmedSource: "openlibrary", hasCover: true });
+    expect(bookRepo.get(app.db, mystery)!.confirmedSource).toBeNull();
+    expect(lookups.reviewItems(app).map((q) => q.book.id)).toEqual([mystery]);
 
-    app.lookup.removeFromQueue(mystery);
+    lookups.dismiss(app, mystery);
     expect(app.lookup.status().reviewCount).toBe(0);
 
     expect(app.lookup.jobs([dune, mystery, 999])).toEqual({
@@ -485,7 +477,7 @@ describe("lookup service", () => {
       put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
       await failing.library.open(root);
       const id = failing.library.index.get("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!.bookId;
-      const r = await failing.lookup.lookup(id);
+      const r = await lookups.find(failing, id);
       expect(r.candidates).toEqual([]);
       expect(r.errors.join(" ")).toContain("ENETUNREACH");
       failing.lookup.enqueue([id]);

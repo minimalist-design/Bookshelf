@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { CoverImage } from "../metadata/types.ts";
 import { decodePng, flattenOnWhite } from "./raster.ts";
@@ -12,71 +12,103 @@ const FIT: Bun.Image.ResizeOptions = { fit: "inside", withoutEnlargement: true }
 /** Source formats that may carry transparency, which JPEG cannot hold. */
 const MAY_HAVE_ALPHA = new Set<Bun.Image.Format>(["png", "webp", "gif"]);
 
-/** Cover images live in the data directory, named by book id: `{id}.jpg` and `{id}.thumb.webp`. */
-export class CoverStore {
-  constructor(private readonly dir: string) {
-    mkdirSync(dir, { recursive: true });
-  }
+/*
+ * Cover images live in the covers directory, named by book id: `{id}.jpg` and `{id}.thumb.webp`.
+ * Every function takes that directory first.
+ */
 
-  path(bookId: number, size: CoverSize): string {
-    return join(this.dir, size === "full" ? `${bookId}.jpg` : `${bookId}.thumb.webp`);
-  }
+export function path(dir: string, bookId: number, size: CoverSize): string {
+  return join(dir, size === "full" ? `${bookId}.jpg` : `${bookId}.thumb.webp`);
+}
 
-  exists(bookId: number): boolean {
-    return existsSync(this.path(bookId, "full"));
-  }
+export function exists(dir: string, bookId: number): boolean {
+  return existsSync(path(dir, bookId, "full"));
+}
 
-  /** Decode, normalize and store a cover. Returns false when the image cannot be decoded. */
-  async save(bookId: number, image: CoverImage): Promise<boolean> {
+/** Decode, normalize and store a cover. Returns false when the image cannot be decoded. */
+export async function save(dir: string, bookId: number, image: CoverImage): Promise<boolean> {
+  try {
+    const meta = await new Bun.Image(image.data, DECODE).metadata();
+    if (meta.width < 16 || meta.height < 16) return false;
+    const full = await fullJpeg(image.data, meta.format);
+    const thumb = await new Bun.Image(image.data, DECODE)
+      .resize(THUMB[0], THUMB[1], FIT)
+      .webp({ quality: 80 })
+      .bytes();
+    writeAtomic(path(dir, bookId, "full"), full);
+    writeAtomic(path(dir, bookId, "thumb"), thumb);
+    return true;
+  } catch (err) {
+    console.warn(`Unusable cover image for book ${bookId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/** Move a book's cover files to another book id (used when merging books). */
+export function adopt(dir: string, fromId: number, toId: number): void {
+  for (const size of SIZES) {
+    const from = path(dir, fromId, size);
+    if (existsSync(from)) renameSync(from, path(dir, toId, size));
+  }
+}
+
+export function remove(dir: string, bookId: number): void {
+  for (const size of SIZES) rmSync(path(dir, bookId, size), { force: true });
+}
+
+export function removeMany(dir: string, bookIds: Iterable<number>): void {
+  for (const id of bookIds) remove(dir, id);
+}
+
+/** Weak validator for HTTP caching. */
+export function etag(dir: string, bookId: number, size: CoverSize): string | null {
+  try {
+    const st = statSync(path(dir, bookId, size));
+    return `W/"${st.size.toString(16)}-${Math.trunc(st.mtimeMs).toString(16)}"`;
+  } catch {
+    return null;
+  }
+}
+
+export interface CoverFile {
+  readonly path: string;
+  /** Null for a file that isn't named like a cover (e.g. a stray temp file). */
+  readonly bookId: number | null;
+  readonly size: number;
+}
+
+/** The book a file in the covers directory belongs to, from its name. */
+export function bookIdOfCoverFile(name: string): number | null {
+  const m = /^(\d+)\.(jpg|thumb\.webp)$/.exec(name);
+  return m ? Number(m[1]) : null;
+}
+
+/** Every file in the covers directory. */
+export function listFiles(dir: string): CoverFile[] {
+  const names = (() => {
     try {
-      const meta = await new Bun.Image(image.data, DECODE).metadata();
-      if (meta.width < 16 || meta.height < 16) return false;
-      const full = await fullJpeg(image.data, meta.format);
-      const thumb = await new Bun.Image(image.data, DECODE)
-        .resize(THUMB[0], THUMB[1], FIT)
-        .webp({ quality: 80 })
-        .bytes();
-      this.writeAtomic(this.path(bookId, "full"), full);
-      this.writeAtomic(this.path(bookId, "thumb"), thumb);
-      return true;
-    } catch (err) {
-      console.warn(`Unusable cover image for book ${bookId}:`, err instanceof Error ? err.message : err);
-      return false;
-    }
-  }
-
-  /** Move a book's cover files to another book id (used when merging books). */
-  adopt(fromId: number, toId: number): void {
-    for (const size of ["full", "thumb"] as const) {
-      const from = this.path(fromId, size);
-      if (existsSync(from)) renameSync(from, this.path(toId, size));
-    }
-  }
-
-  remove(bookId: number): void {
-    rmSync(this.path(bookId, "full"), { force: true });
-    rmSync(this.path(bookId, "thumb"), { force: true });
-  }
-
-  removeMany(bookIds: Iterable<number>): void {
-    for (const id of bookIds) this.remove(id);
-  }
-
-  /** Weak validator for HTTP caching. */
-  etag(bookId: number, size: CoverSize): string | null {
-    try {
-      const st = statSync(this.path(bookId, size));
-      return `W/"${st.size.toString(16)}-${Math.trunc(st.mtimeMs).toString(16)}"`;
+      return readdirSync(dir);
     } catch {
-      return null;
+      return [];
     }
-  }
+  })();
+  return names.map((name) => ({ path: join(dir, name), bookId: bookIdOfCoverFile(name), size: sizeOf(join(dir, name)) }));
+}
 
-  private writeAtomic(target: string, data: Uint8Array): void {
-    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmp, data);
-    renameSync(tmp, target);
+function sizeOf(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0; // vanished
   }
+}
+
+const SIZES = ["full", "thumb"] as const;
+
+function writeAtomic(target: string, data: Uint8Array): void {
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, data);
+  renameSync(tmp, target);
 }
 
 /** Resized JPEG; transparent sources are composited onto white first (Bun.Image would just drop alpha). */

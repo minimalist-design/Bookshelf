@@ -1,19 +1,21 @@
+import type { Database } from "bun:sqlite";
 import { rmSync, watch, type FSWatcher, type Stats } from "node:fs";
 import { access, constants, stat } from "node:fs/promises";
 import { join, sep } from "node:path";
-import type { BooksRepo } from "../db/repo/books.ts";
-import type { HashCacheRepo } from "../db/repo/hashCache.ts";
+import * as bookRepo from "../db/repo/books.ts";
+import * as hashCacheRepo from "../db/repo/hashCache.ts";
 import type { EventBus } from "../events.ts";
 import type { Extractor } from "../extract/index.ts";
 import { FORMAT_METADATA_RANK } from "../extract/merge.ts";
 import type { RawMetadata } from "../metadata/types.ts";
 import { detectFormat } from "../naming/formats.ts";
 import type { LibraryState, LibraryStatus } from "../../shared/types.ts";
-import { LibraryIndex, type IndexedFile } from "./libraryIndex.ts";
-import { Linker, type LinkerDeps, type LinkResult } from "./linker.ts";
-import { Retention } from "./retention.ts";
+import { createLibraryIndex, inodeKey, type IndexedFile, type LibraryIndex } from "./libraryIndex.ts";
+import { createLinker, type Linker, type LinkerDeps, type LinkResult } from "./linker.ts";
+import { createRetention, type Retention } from "./retention.ts";
 import { INCOMING_DIR } from "./paths.ts";
 import { isIgnoredRelPath, walkBooks, type WalkedFile } from "./walk.ts";
+import { UnavailableError } from "../api/http.ts";
 
 export interface LibraryOptions {
   /** Per-path debounce of watcher events. */
@@ -36,8 +38,7 @@ export const DEFAULT_LIBRARY_OPTIONS: LibraryOptions = {
 };
 
 export interface LibraryDeps {
-  books: BooksRepo;
-  hashCache: HashCacheRepo;
+  db: Database;
   extract: Extractor;
   events: EventBus;
   onLinkedNew?: LinkerDeps["onLinkedNew"];
@@ -53,295 +54,288 @@ const MOVE_MEMORY_MS = 60_000;
  * Owns the live view of the library directory: full scans, the recursive watcher,
  * linking files to metadata and the retention rule.
  */
-export class Library {
-  readonly index = new LibraryIndex();
+export interface Library {
+  readonly index: LibraryIndex;
   readonly linker: Linker;
   readonly retention: Retention;
-  private readonly opts: LibraryOptions;
-
-  private root: string | null = null;
-  private state: LibraryState = "no-root";
-  private message: string | null = null;
-  /** The last full scan found no files while metadata exists (see Retention.reconcile). */
-  private emptyGuard = false;
-  private scanProgress: { done: number; total: number } | null = null;
-  private generation = 0;
-  private watcher: FSWatcher | null = null;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly pathLocks = new Map<string, Promise<unknown>>();
-  /** Files that just disappeared, keyed by inode+size+mtime, so a move can reuse the hash. */
-  private readonly recentlyRemoved = new Map<string, { hash: string; at: number }>();
-  private scanPromise: Promise<void> | null = null;
-  private lastStatusEmit = 0;
-
-  constructor(private readonly deps: LibraryDeps, opts: Partial<LibraryOptions> = {}) {
-    this.opts = { ...DEFAULT_LIBRARY_OPTIONS, ...opts };
-    this.retention = new Retention({
-      books: deps.books,
-      index: this.index,
-      graceMs: this.opts.graceMs,
-      onDeleted: (ids) => {
-        deps.onBooksDeleted?.(ids);
-        deps.events.libraryChanged(ids);
-      },
-    });
-    this.linker = new Linker({
-      books: deps.books,
-      hashCache: deps.hashCache,
-      extract: deps.extract,
-      index: this.index,
-      onLinkedNew: deps.onLinkedNew,
-      canonicalize: deps.canonicalize,
-      isKnownAuthor: (name) => deps.books.hasAuthor(name),
-    });
-  }
-
-  get rootPath(): string | null {
-    return this.root;
-  }
-
-  status(): LibraryStatus {
-    return {
-      state: this.state,
-      root: this.root,
-      scan: this.scanProgress,
-      fileCount: this.index.size,
-      bookCount: this.index.bookIds().length,
-      watching: this.watcher !== null,
-      message: this.message,
-    };
-  }
-
+  readonly rootPath: string | null;
+  status(): LibraryStatus;
   /** Switch to `root` (or none): stops watching, clears the index, starts watcher + full scan. */
-  async open(root: string | null): Promise<void> {
-    await this.close();
-    this.root = root;
-    this.state = root ? "scanning" : "no-root";
-    this.emitStatus(true);
-    if (!root) return;
-    // Leftovers of uploads interrupted by a crash/restart.
-    rmSync(join(root, INCOMING_DIR), { recursive: true, force: true });
-    await this.rescan(); // starts the watcher once the root is accessible
-  }
-
-  async close(): Promise<void> {
-    this.generation++;
-    this.watcher?.close();
-    this.watcher = null;
-    if (this.pollTimer) clearInterval(this.pollTimer);
-    this.pollTimer = null;
-    for (const t of this.debounceTimers.values()) clearTimeout(t);
-    this.debounceTimers.clear();
-    this.retention.stop();
-    this.index.clear();
-    this.scanProgress = null;
-    this.scanPromise = null;
-  }
-
+  open(root: string | null): Promise<void>;
+  close(): Promise<void>;
   /** Resolves once no full scan is running (the index is complete). */
-  async whenReady(): Promise<void> {
-    while (this.scanPromise) await this.scanPromise;
-  }
-
+  whenReady(): Promise<void>;
   /** Full reconciliation of the index with the disk. Concurrent calls share one run. */
-  rescan(): Promise<void> {
-    if (!this.scanPromise) {
-      this.scanPromise = this.fullScan().finally(() => {
-        this.scanPromise = null;
-      });
-    }
-    return this.scanPromise;
-  }
+  rescan(): Promise<void>;
+  /** A file of `bookId` was indexed (watcher or import). */
+  fileAdded(bookId: number): void;
+  /** Bring the index in line with whatever is (or isn't) at `rel` now. */
+  reconcilePath(rel: string): Promise<void>;
+}
+
+/** Whether the index already holds this exact version of the file. */
+export function isUnchanged(existing: IndexedFile | undefined, st: Pick<Stats, "size" | "mtimeMs">): boolean {
+  return !!existing && existing.size === st.size && existing.mtimeMs === Math.trunc(st.mtimeMs);
+}
+
+/** Scan order: best metadata sources first, so multi-format books are usually created from their richest file. */
+export function scanOrder<T extends { detected: { format: keyof typeof FORMAT_METADATA_RANK } }>(found: readonly T[]): T[] {
+  return found.toSorted((a, b) => FORMAT_METADATA_RANK[a.detected.format] - FORMAT_METADATA_RANK[b.detected.format]);
+}
+
+/** Status events are throttled to one per 250 ms unless forced (state changes). */
+export function shouldEmitStatus(force: boolean, now: number, lastEmit: number): boolean {
+  return force || now - lastEmit >= STATUS_THROTTLE_MS;
+}
+
+const STATUS_THROTTLE_MS = 250;
+const moveKey = (st: Pick<Stats, "ino" | "size" | "mtimeMs">) => inodeKey(st.ino, st.size, st.mtimeMs);
+
+export function createLibrary(deps: LibraryDeps, options: Partial<LibraryOptions> = {}): Library {
+  const opts: LibraryOptions = { ...DEFAULT_LIBRARY_OPTIONS, ...options };
+  const index = createLibraryIndex();
+  const retention = createRetention({
+    db: deps.db,
+    index,
+    graceMs: opts.graceMs,
+    onDeleted: (ids) => {
+      deps.onBooksDeleted?.(ids);
+      deps.events.libraryChanged(ids);
+    },
+  });
+  const linker = createLinker({
+    db: deps.db,
+    extract: deps.extract,
+    index,
+    onLinkedNew: deps.onLinkedNew,
+    canonicalize: deps.canonicalize,
+    isKnownAuthor: (name) => bookRepo.hasAuthor(deps.db, name),
+  });
+
+  let root: string | null = null;
+  let state: LibraryState = "no-root";
+  let message: string | null = null;
+  /** The last full scan found no files while metadata exists (see Retention.reconcile). */
+  let emptyGuard = false;
+  let scanProgress: { done: number; total: number } | null = null;
+  /** Bumped by close(): work started under an older generation stops. */
+  let generation = 0;
+  let watcher: FSWatcher | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pathLocks = new Map<string, Promise<unknown>>();
+  /** Files that just disappeared, keyed by inode+size+mtime, so a move can reuse the hash. */
+  const recentlyRemoved = new Map<string, { hash: string; at: number }>();
+  let scanPromise: Promise<void> | null = null;
+  let lastStatusEmit = 0;
+
+  const status = (): LibraryStatus => ({
+    state,
+    root,
+    scan: scanProgress,
+    fileCount: index.size,
+    bookCount: index.bookIds().length,
+    watching: watcher !== null,
+    message,
+  });
+
+  const emitStatus = (force = false) => {
+    const now = Date.now();
+    if (!shouldEmitStatus(force, now, lastStatusEmit)) return;
+    lastStatusEmit = now;
+    deps.events.emit({ type: "library.status", status: status() });
+  };
+
+  const close = async () => {
+    generation++;
+    watcher?.close();
+    watcher = null;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+    for (const t of debounceTimers.values()) clearTimeout(t);
+    debounceTimers.clear();
+    retention.stop();
+    index.clear();
+    scanProgress = null;
+    scanPromise = null;
+  };
+
+  const rescan = (): Promise<void> => {
+    scanPromise ??= fullScan().finally(() => {
+      scanPromise = null;
+    });
+    return scanPromise;
+  };
+
+  const fileAdded = (bookId: number) => {
+    retention.fileAdded(bookId);
+    if (!emptyGuard) return;
+    // The library is evidently there after all: drop the warning and reconcile properly.
+    emptyGuard = false;
+    message = null;
+    emitStatus(true);
+    void rescan();
+  };
 
   // ---- full scan ------------------------------------------------------------
 
-  private async fullScan(): Promise<void> {
-    const gen = this.generation;
-    const root = this.root;
-    if (!root) return;
+  const fullScan = async (): Promise<void> => {
+    const gen = generation;
+    const scanRoot = root;
+    if (!scanRoot) return;
 
     try {
-      await access(root, constants.R_OK | constants.X_OK);
+      await access(scanRoot, constants.R_OK | constants.X_OK);
     } catch {
-      if (gen !== this.generation) return;
-      this.state = "unavailable";
-      this.message = `Library directory is not accessible: ${root}`;
-      this.startPolling(); // recover automatically when it comes back (e.g. drive mounted)
-      this.emitStatus(true);
+      if (gen !== generation) return;
+      state = "unavailable";
+      message = `Library directory is not accessible: ${scanRoot}`;
+      startPolling(); // recover automatically when it comes back (e.g. drive mounted)
+      emitStatus(true);
       return;
     }
-    if (gen !== this.generation) return; // closed or re-opened meanwhile
-    if (!this.watcher) this.startWatching();
+    if (gen !== generation) return; // closed or re-opened meanwhile
+    if (!watcher) startWatching(scanRoot);
 
-    this.state = "scanning";
-    this.message = null;
-    this.emptyGuard = false;
-    const found: WalkedFile[] = [];
-    for await (const f of walkBooks(root)) {
-      if (gen !== this.generation) return;
-      found.push(f);
+    state = "scanning";
+    message = null;
+    emptyGuard = false;
+    const walked: WalkedFile[] = [];
+    for await (const f of walkBooks(scanRoot)) {
+      if (gen !== generation) return;
+      walked.push(f);
     }
-    // Best metadata sources first, so multi-format books are usually created from their richest file.
-    found.sort((a, b) => FORMAT_METADATA_RANK[a.detected.format] - FORMAT_METADATA_RANK[b.detected.format]);
-    this.scanProgress = { done: 0, total: found.length };
-    this.emitStatus(true);
+    const found = scanOrder(walked);
+    const progress = { done: 0, total: found.length };
+    scanProgress = progress;
+    emitStatus(true);
 
-    const seen = new Set<string>(found.map((f) => f.rel));
+    // A small pool of workers takes the files in order.
     let next = 0;
     const worker = async () => {
-      while (next < found.length && gen === this.generation) {
+      while (next < found.length && gen === generation) {
         const f = found[next++]!;
         try {
-          await this.reconcileFile(f, { waitStable: false });
+          await reconcileFile(f, { waitStable: false });
         } catch (err) {
           console.warn(`Failed to process ${f.rel}:`, err);
         }
-        this.scanProgress!.done++;
-        this.emitStatus();
+        progress.done++;
+        emitStatus();
       }
     };
-    await Promise.all(Array.from({ length: this.opts.scanConcurrency }, worker));
-    if (gen !== this.generation) return;
+    await Promise.all(Array.from({ length: opts.scanConcurrency }, worker));
+    if (gen !== generation) return;
 
     // Files indexed earlier that no longer exist (rescans).
-    for (const f of [...this.index.allFiles()]) {
-      if (!seen.has(f.relPath)) this.dropFile(f.relPath);
-    }
-    this.deps.hashCache.prune(new Set(found.map((f) => f.abs)));
-    const { skipped } = this.retention.reconcile(found.length);
-    if (skipped) {
-      this.emptyGuard = true;
-      this.message = "Library appears empty; kept all metadata (is the drive mounted?)";
+    const seen = new Set(found.map((f) => f.rel));
+    for (const f of [...index.allFiles()].filter((f) => !seen.has(f.relPath))) dropFile(f.relPath);
+    hashCacheRepo.prune(deps.db, new Set(found.map((f) => f.abs)));
+    if (retention.reconcile(found.length).skipped) {
+      emptyGuard = true;
+      message = "Library appears empty; kept all metadata (is the drive mounted?)";
     }
 
-    this.state = "ready";
-    this.scanProgress = null;
-    this.emitStatus(true);
-    this.deps.events.libraryChanged([]);
-  }
-
-  /** A file of `bookId` was indexed (watcher or import). */
-  fileAdded(bookId: number): void {
-    this.retention.fileAdded(bookId);
-    if (!this.emptyGuard) return;
-    // The library is evidently there after all: drop the warning and reconcile properly.
-    this.emptyGuard = false;
-    this.message = null;
-    this.emitStatus(true);
-    void this.rescan();
-  }
+    state = "ready";
+    scanProgress = null;
+    emitStatus(true);
+    deps.events.libraryChanged([]);
+  };
 
   // ---- watcher --------------------------------------------------------------
 
-  private startWatching(): void {
-    const root = this.root!;
+  const startWatching = (watchRoot: string) => {
     try {
-      this.watcher = watch(root, { recursive: true }, (_event, filename) => this.onFsEvent(filename));
-      if (this.pollTimer) clearInterval(this.pollTimer);
-      this.pollTimer = null;
-      this.watcher.on("error", (err) => {
+      watcher = watch(watchRoot, { recursive: true }, (_event, filename) => onFsEvent(filename));
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      watcher.on("error", (err) => {
         console.warn("Library watcher failed, falling back to periodic rescans:", err);
-        this.watcher?.close();
-        this.watcher = null;
-        this.startPolling();
+        watcher?.close();
+        watcher = null;
+        startPolling();
       });
     } catch (err) {
       console.warn("Recursive watching unavailable, falling back to periodic rescans:", err);
-      this.startPolling();
+      startPolling();
     }
-  }
+  };
 
-  private startPolling(): void {
-    if (this.pollTimer) return;
-    this.pollTimer = setInterval(() => void this.rescan(), this.opts.pollIntervalMs);
-    this.emitStatus(true);
-  }
+  const startPolling = () => {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => void rescan(), opts.pollIntervalMs);
+    emitStatus(true);
+  };
 
-  private onFsEvent(filename: string | Buffer | null): void {
+  const onFsEvent = (filename: string | Buffer | null) => {
     if (filename === null) {
-      void this.rescan(); // event without a path: resync everything
+      void rescan(); // event without a path: resync everything
       return;
     }
     const rel = String(filename).split(sep).join("/");
     if (!rel || isIgnoredRelPath(rel)) return;
-    const prev = this.debounceTimers.get(rel);
-    if (prev) clearTimeout(prev);
-    const gen = this.generation;
-    this.debounceTimers.set(
+    clearTimeout(debounceTimers.get(rel));
+    const gen = generation;
+    debounceTimers.set(
       rel,
       setTimeout(() => {
-        this.debounceTimers.delete(rel);
-        if (gen !== this.generation) return;
-        this.reconcilePath(rel).catch((err) => console.warn(`Failed to reconcile ${rel}:`, err));
-      }, this.opts.debounceMs),
+        debounceTimers.delete(rel);
+        if (gen !== generation) return;
+        reconcilePath(rel).catch((err) => console.warn(`Failed to reconcile ${rel}:`, err));
+      }, opts.debounceMs),
     );
-  }
+  };
 
-  /** Bring the index in line with whatever is (or isn't) at `rel` now. */
-  async reconcilePath(rel: string): Promise<void> {
-    const root = this.root;
+  const reconcilePath = async (rel: string): Promise<void> => {
     if (!root) return;
-    const abs = join(root, rel);
+    const base = root;
+    const abs = join(base, rel);
     const st = await stat(abs).catch(() => null);
 
     if (!st) {
-      if (this.index.get(rel)) this.dropFile(rel);
-      else for (const f of this.index.filesUnder(rel)) this.dropFile(f.relPath);
+      if (index.get(rel)) dropFile(rel);
+      else for (const f of index.filesUnder(rel)) dropFile(f.relPath);
       return;
     }
     if (st.isDirectory()) {
-      for await (const f of walkBooks(root, rel)) await this.reconcileFile(f, { waitStable: true });
-      for (const f of this.index.filesUnder(rel)) {
-        if (!(await stat(join(root, f.relPath)).catch(() => null))) this.dropFile(f.relPath);
+      for await (const f of walkBooks(base, rel)) await reconcileFile(f, { waitStable: true });
+      for (const f of index.filesUnder(rel)) {
+        if (!(await stat(join(base, f.relPath)).catch(() => null))) dropFile(f.relPath);
       }
       return;
     }
     if (!st.isFile()) return;
-    const name = rel.slice(rel.lastIndexOf("/") + 1);
-    const detected = detectFormat(name);
-    if (detected) await this.reconcileFile({ abs, rel, stat: st, detected }, { waitStable: true });
-  }
+    const detected = detectFormat(rel.slice(rel.lastIndexOf("/") + 1));
+    if (detected) await reconcileFile({ abs, rel, stat: st, detected }, { waitStable: true });
+  };
 
   // ---- per-file processing ---------------------------------------------------
 
-  private moveKey(st: Pick<Stats, "ino" | "size" | "mtimeMs">): string {
-    return `${st.ino}:${st.size}:${Math.trunc(st.mtimeMs)}`;
-  }
-
   /** Serialize work on one path (watcher and scan may race on the same file). */
-  private async withPathLock<T>(rel: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.pathLocks.get(rel) ?? Promise.resolve();
+  const withPathLock = async <T>(rel: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = pathLocks.get(rel) ?? Promise.resolve();
     const run = prev.then(fn, fn);
     const settled = run.catch(() => undefined);
-    this.pathLocks.set(rel, settled);
+    pathLocks.set(rel, settled);
     try {
       return await run;
     } finally {
-      if (this.pathLocks.get(rel) === settled) this.pathLocks.delete(rel);
+      if (pathLocks.get(rel) === settled) pathLocks.delete(rel);
     }
-  }
+  };
 
-  private async reconcileFile(f: WalkedFile, { waitStable }: { waitStable: boolean }): Promise<LinkResult | null> {
-    const gen = this.generation;
-    const unchanged = (s: Stats) => {
-      const existing = this.index.get(f.rel);
-      return !!existing && existing.size === s.size && existing.mtimeMs === Math.trunc(s.mtimeMs);
-    };
-    if (unchanged(f.stat)) return null;
+  const reconcileFile = async (f: WalkedFile, { waitStable }: { waitStable: boolean }): Promise<LinkResult | null> => {
+    const gen = generation;
+    if (isUnchanged(index.get(f.rel), f.stat)) return null;
 
-    let st = f.stat;
-    const moved = this.takeRecentlyRemoved(st) ?? (await this.takeMovedFrom(f.rel, st));
-    if (!moved && waitStable) {
-      const stable = await this.waitUntilStable(join(this.root!, f.rel), st);
-      if (!stable || gen !== this.generation) return null;
-      st = stable;
-    }
+    const moved = takeRecentlyRemoved(f.stat) ?? (await takeMovedFrom(f.rel, f.stat));
+    const st = !moved && waitStable ? await waitUntilStable(join(root!, f.rel), f.stat) : f.stat;
+    if (!st || gen !== generation) return null;
 
-    return this.withPathLock(f.rel, async () => {
-      if (gen !== this.generation || unchanged(st)) return null;
-      const previous = this.index.remove(f.rel);
-      const result = await this.linker.link({
+    return withPathLock(f.rel, async () => {
+      if (gen !== generation || isUnchanged(index.get(f.rel), st)) return null;
+      const previous = index.remove(f.rel);
+      const result = await linker.link({
         abs: f.abs,
         rel: f.rel,
         size: st.size,
@@ -350,66 +344,91 @@ export class Library {
         detected: f.detected,
         hash: moved ?? undefined,
       });
-      if (gen !== this.generation) {
-        this.index.remove(f.rel);
+      if (gen !== generation) {
+        index.remove(f.rel);
         return null;
       }
-      this.fileAdded(result.file.bookId);
-      if (previous && previous.bookId !== result.file.bookId) this.retention.fileRemoved(previous.bookId);
-      this.deps.events.libraryChanged(previous ? [previous.bookId, result.file.bookId] : [result.file.bookId]);
-      this.emitStatus();
+      fileAdded(result.file.bookId);
+      if (previous && previous.bookId !== result.file.bookId) retention.fileRemoved(previous.bookId);
+      deps.events.libraryChanged(previous ? [previous.bookId, result.file.bookId] : [result.file.bookId]);
+      emitStatus();
       return result;
     });
-  }
+  };
 
-  private async waitUntilStable(abs: string, initial: Stats): Promise<Stats | null> {
+  /** The file's stat once its size and mtime stop changing; null if it vanished or never settled. */
+  const waitUntilStable = async (abs: string, initial: Stats): Promise<Stats | null> => {
     let prev = initial;
     for (let i = 0; i < 150; i++) {
-      await sleep(this.opts.stableMs);
+      await sleep(opts.stableMs);
       const cur = await stat(abs).catch(() => null);
       if (!cur || !cur.isFile()) return null;
       if (cur.size === prev.size && cur.mtimeMs === prev.mtimeMs) return cur;
       prev = cur;
     }
     return null;
-  }
+  };
 
-  private dropFile(rel: string): IndexedFile | undefined {
-    const removed = this.index.remove(rel);
+  const dropFile = (rel: string): IndexedFile | undefined => {
+    const removed = index.remove(rel);
     if (!removed) return undefined;
     const now = Date.now();
-    this.recentlyRemoved.set(this.moveKey({ ino: removed.ino, size: removed.size, mtimeMs: removed.mtimeMs }), {
-      hash: removed.hash,
-      at: now,
-    });
-    for (const [k, v] of this.recentlyRemoved) if (now - v.at > MOVE_MEMORY_MS) this.recentlyRemoved.delete(k);
-    this.retention.fileRemoved(removed.bookId);
-    this.deps.events.libraryChanged([removed.bookId]);
-    this.emitStatus();
+    recentlyRemoved.set(moveKey(removed), { hash: removed.hash, at: now });
+    for (const [k, v] of recentlyRemoved) if (now - v.at > MOVE_MEMORY_MS) recentlyRemoved.delete(k);
+    retention.fileRemoved(removed.bookId);
+    deps.events.libraryChanged([removed.bookId]);
+    emitStatus();
     return removed;
-  }
+  };
 
   /** The new path of a move was seen before the old path's removal: drop the old entry, reuse its hash. */
-  private async takeMovedFrom(rel: string, st: Stats): Promise<string | null> {
-    const old = this.index.findByInode(st.ino, st.size, st.mtimeMs);
+  const takeMovedFrom = async (rel: string, st: Stats): Promise<string | null> => {
+    const old = index.findByInode(st.ino, st.size, st.mtimeMs);
     if (!old || old.relPath === rel) return null;
-    if (await stat(join(this.root!, old.relPath)).catch(() => null)) return null; // hard link / copy, not a move
-    this.dropFile(old.relPath);
-    return this.takeRecentlyRemoved(st);
-  }
+    if (await stat(join(root!, old.relPath)).catch(() => null)) return null; // hard link / copy, not a move
+    dropFile(old.relPath);
+    return takeRecentlyRemoved(st);
+  };
 
-  private takeRecentlyRemoved(st: Stats): string | null {
-    const key = this.moveKey(st);
-    const hit = this.recentlyRemoved.get(key);
+  const takeRecentlyRemoved = (st: Stats): string | null => {
+    const key = moveKey(st);
+    const hit = recentlyRemoved.get(key);
     if (!hit) return null;
-    this.recentlyRemoved.delete(key);
+    recentlyRemoved.delete(key);
     return Date.now() - hit.at <= MOVE_MEMORY_MS ? hit.hash : null;
-  }
+  };
 
-  private emitStatus(force = false): void {
-    const now = Date.now();
-    if (!force && now - this.lastStatusEmit < 250) return;
-    this.lastStatusEmit = now;
-    this.deps.events.emit({ type: "library.status", status: this.status() });
-  }
+  return {
+    index,
+    linker,
+    retention,
+    get rootPath() {
+      return root;
+    },
+    status,
+    async open(next) {
+      await close();
+      root = next;
+      state = next ? "scanning" : "no-root";
+      emitStatus(true);
+      if (!next) return;
+      // Leftovers of uploads interrupted by a crash/restart.
+      rmSync(join(next, INCOMING_DIR), { recursive: true, force: true });
+      await rescan(); // starts the watcher once the root is accessible
+    },
+    close,
+    async whenReady() {
+      while (scanPromise) await scanPromise;
+    },
+    rescan,
+    fileAdded,
+    reconcilePath,
+  };
+}
+
+/** Wait for a complete index of an accessible library (bulk operations need to see every book). */
+export async function libraryReady(library: Library): Promise<void> {
+  if (!library.rootPath) throw new UnavailableError("No library directory is configured");
+  await library.whenReady();
+  if (library.status().state === "unavailable") throw new UnavailableError("The library directory is not accessible");
 }

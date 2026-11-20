@@ -1,15 +1,20 @@
 import type { AppContext } from "../app.ts";
 import { LOOKUP_SOURCES, type ApplyMetadataRequest, type BookUpdate, type LookupSource, type SettingsUpdate } from "../../shared/types.ts";
 import { ValidationError } from "../library/paths.ts";
-import { health } from "./health.ts";
 import { handle, json, notFound, readJson } from "./http.ts";
-import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
+import { bookDetail, coverResponse, facets, libraryPage, shelfList } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
 import { CONTENT_TYPES, contentDisposition, serveFile } from "./files.ts";
+import * as referenceStore from "../reference/store.ts";
+import * as lookups from "../services/lookup/lookup.ts";
+import * as books from "../services/books.ts";
+import * as shelves from "../services/shelves.ts";
+import * as maintenance from "../services/maintenance.ts";
+import * as cleanup from "../services/cleanup.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
-    "/api/health": { GET: () => health(app), HEAD: () => health(app) },
+    "/api/health": { GET: () => app.health(), HEAD: () => app.health() },
     "/api/settings": {
       GET: handle(() => json(getSettings(app))),
       PUT: handle(async (req) => json(updateSettings(app, await readJson<SettingsUpdate>(req)))),
@@ -23,64 +28,64 @@ export function apiRoutes(app: AppContext) {
       }),
     },
     "/api/shelves": {
-      GET: handle(() => json(shelves(app))),
+      GET: handle(() => json(shelfList(app))),
       POST: handle(async (req) => {
-        const name = await app.shelfService.create(nameOf(await readJson<{ name: unknown }>(req)));
+        const name = await shelves.create(app, nameOf(await readJson<{ name: unknown }>(req)));
         return json({ name, bookCount: 0 }, { status: 201 });
       }),
     },
     "/api/shelves/:name": {
       PATCH: handle(async (req: Bun.BunRequest<"/api/shelves/:name">) => {
-        const name = await app.shelfService.rename(req.params.name, nameOf(await readJson<{ name: unknown }>(req)));
-        return json(shelves(app).find((s) => s.name === name) ?? { name, bookCount: 0 });
+        const name = await shelves.rename(app, req.params.name, nameOf(await readJson<{ name: unknown }>(req)));
+        return json(shelfList(app).find((s) => s.name === name) ?? { name, bookCount: 0 });
       }),
-      DELETE: handle(async (req: Bun.BunRequest<"/api/shelves/:name">) => json(await app.shelfService.remove(req.params.name))),
+      DELETE: handle(async (req: Bun.BunRequest<"/api/shelves/:name">) => json(await shelves.remove(app, req.params.name))),
     },
     "/api/books/move": {
       POST: handle(async (req) => {
         const body = await readJson<{ ids: unknown; shelf: unknown }>(req);
         if (body.shelf !== null && typeof body.shelf !== "string") throw new ValidationError("shelf must be a name or null");
-        return json(await app.bookService.move(idList(body.ids), body.shelf));
+        return json(await books.move(app, idList(body.ids), body.shelf));
       }),
     },
     "/api/books/delete": {
-      POST: handle(async (req) => json(await app.bookService.deleteBooks(idList((await readJson<{ ids: unknown }>(req)).ids)))),
+      POST: handle(async (req) => json(await books.remove(app, idList((await readJson<{ ids: unknown }>(req)).ids)))),
     },
     "/api/books/:id/files/:hash": {
       GET: handle((req: Bun.BunRequest<"/api/books/:id/files/:hash">) => bookFile(app, req)),
       HEAD: handle((req: Bun.BunRequest<"/api/books/:id/files/:hash">) => bookFile(app, req)),
       DELETE: handle(async (req: Bun.BunRequest<"/api/books/:id/files/:hash">) =>
-        json(await app.bookService.deleteFile(Number(req.params.id), req.params.hash)),
+        json(await books.removeFile(app, Number(req.params.id), req.params.hash)),
       ),
     },
     "/api/facets": { GET: handle(() => json(facets(app))) },
     "/api/books/normalize-filenames": {
-      POST: handle(async (req) => json(await app.bookService.normalizeFilenames(idList((await readJson<{ ids: unknown }>(req)).ids)))),
+      POST: handle(async (req) => json(await books.normalizeFilenames(app, idList((await readJson<{ ids: unknown }>(req)).ids)))),
     },
     "/api/books/:id": {
       GET: handle((req: Bun.BunRequest<"/api/books/:id">) => json(bookDetail(app, Number(req.params.id)))),
       PATCH: handle(async (req: Bun.BunRequest<"/api/books/:id">) =>
-        json(await app.bookService.update(Number(req.params.id), await readJson<BookUpdate>(req))),
+        json(await books.update(app, Number(req.params.id), await readJson<BookUpdate>(req))),
       ),
       DELETE: handle(async (req: Bun.BunRequest<"/api/books/:id">) => {
         bookDetail(app, Number(req.params.id)); // 404 unless on disk
-        return json(await app.bookService.deleteBooks([Number(req.params.id)]));
+        return json(await books.remove(app, [Number(req.params.id)]));
       }),
     },
     "/api/books/:id/normalize-filename": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/normalize-filename">) =>
-        json(await app.bookService.normalizeFilenames([Number(req.params.id)])),
+        json(await books.normalizeFilenames(app, [Number(req.params.id)])),
       ),
     },
     "/api/books/:id/merge": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/merge">) => {
         const { intoId } = await readJson<{ intoId: unknown }>(req);
-        return json(await app.bookService.merge(Number(req.params.id), idList([intoId])[0]!));
+        return json(await books.merge(app, Number(req.params.id), idList([intoId])[0]!));
       }),
     },
     "/api/books/:id/files/:hash/detach": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/files/:hash/detach">) =>
-        json(await app.bookService.detach(Number(req.params.id), req.params.hash)),
+        json(await books.detach(app, Number(req.params.id), req.params.hash)),
       ),
     },
     "/api/books/:id/cover": {
@@ -90,11 +95,11 @@ export function apiRoutes(app: AppContext) {
       PUT: handle(async (req: Bun.BunRequest<"/api/books/:id/cover">) => {
         const data = await req.bytes();
         if (data.byteLength > 50 * 1024 * 1024) throw new ValidationError("Image is too large (max 50 MB)");
-        await app.bookService.setCover(Number(req.params.id), data);
+        await books.setCover(app, Number(req.params.id), data);
         return json(bookDetail(app, Number(req.params.id)));
       }),
       DELETE: handle(async (req: Bun.BunRequest<"/api/books/:id/cover">) => {
-        await app.bookService.removeCover(Number(req.params.id));
+        await books.removeCover(app, Number(req.params.id));
         return json(bookDetail(app, Number(req.params.id)));
       }),
     },
@@ -103,80 +108,78 @@ export function apiRoutes(app: AppContext) {
     "/api/import": {
       POST: handle(async (req) => {
         const url = new URL(req.url);
-        const result = await app.importer.importStream(req.body, url.searchParams.get("filename") ?? "", url.searchParams.get("shelf"));
-        if (result.status === "imported" && url.searchParams.get("lookup") === "1") {
-          app.lookup.enqueue([result.bookId]);
-          result.lookupQueued = true;
-        }
-        const status = result.status === "duplicate" ? 409 : result.status === "attached" ? 200 : 201;
-        return json(result, { status });
+        const imported = await app.importer.importStream(req.body, url.searchParams.get("filename") ?? "", url.searchParams.get("shelf"));
+        const queue = imported.status === "imported" && url.searchParams.get("lookup") === "1";
+        if (queue) app.lookup.enqueue([imported.bookId]);
+        const status = imported.status === "duplicate" ? 409 : imported.status === "attached" ? 200 : 201;
+        return json(queue ? { ...imported, lookupQueued: true } : imported, { status });
       }),
     },
-    "/api/maintenance/stats": { GET: handle(() => json(app.maintenance.stats())) },
+    "/api/maintenance/stats": { GET: handle(() => json(maintenance.stats(app))) },
     "/api/maintenance/missing": {
-      GET: handle(async () => json(await app.maintenance.missing())),
+      GET: handle(async () => json(await maintenance.missing(app))),
       // Forget (permanently delete) metadata of books without files.
-      POST: handle(async (req) => json(await app.maintenance.forget(idList((await readJson<{ ids: unknown }>(req)).ids)))),
+      POST: handle(async (req) => json(await maintenance.forget(app, idList((await readJson<{ ids: unknown }>(req)).ids)))),
     },
-    "/api/maintenance/cleanup": { POST: handle(async () => json(await app.maintenance.cleanup())) },
-    "/api/maintenance/rules": { POST: handle(async () => json(await app.maintenance.applyMetadataRules())) },
+    "/api/maintenance/cleanup": { POST: handle(async () => json(await maintenance.cleanup(app))) },
+    "/api/maintenance/rules": { POST: handle(async () => json(await maintenance.applyMetadataRules(app))) },
     "/api/maintenance/normalize": {
       POST: handle(async (req) => {
         const { shelf } = await readJson<{ shelf?: unknown }>(req);
         if (shelf !== undefined && shelf !== null && typeof shelf !== "string") throw new ValidationError("shelf must be a name, \"\" or null");
-        return json(await app.maintenance.normalize(shelf as string | null | undefined));
+        return json(await maintenance.normalize(app, shelf as string | null | undefined));
       }),
     },
     // Reference data: GET lists the imported files; POST imports the request body (raw file, ?name=<file name>).
     "/api/reference": {
-      GET: handle(() => json(app.reference.list())),
-      POST: handle(async (req) => json(await app.reference.importUpload(req.body, new URL(req.url).searchParams.get("name") ?? ""), { status: 201 })),
+      GET: handle(() => json(referenceStore.list(app.config.referenceDir))),
+      POST: handle(async (req) => json(await referenceStore.importUpload(app.config.referenceDir, req.body, new URL(req.url).searchParams.get("name") ?? "", app.config.maxUploadBytes), { status: 201 })),
     },
     "/api/reference/from-file": {
       POST: handle(async (req) => {
         const { path } = await readJson<{ path?: unknown }>(req);
         if (typeof path !== "string") throw new ValidationError("path must be a file path on the server");
-        return json(await app.reference.importFile(path), { status: 201 });
+        return json(await referenceStore.importFile(app.config.referenceDir, path), { status: 201 });
       }),
     },
     "/api/reference/:source": {
       DELETE: handle((req: Bun.BunRequest<"/api/reference/:source">) => {
-        app.reference.remove(req.params.source);
+        referenceStore.remove(app.config.referenceDir, req.params.source);
         return json({ removed: req.params.source });
       }),
     },
-    "/api/maintenance/http-cache": { DELETE: handle(() => json({ removed: app.maintenance.clearHttpCache() })) },
+    "/api/maintenance/http-cache": { DELETE: handle(() => json({ removed: maintenance.clearHttpCache(app) })) },
     "/api/cleanup/groups": {
-      GET: handle(async (req) => json(await app.cleanup.groups(new URL(req.url).searchParams.get("field")))),
+      GET: handle(async (req) => json(await cleanup.groups(app, new URL(req.url).searchParams.get("field")))),
     },
     "/api/cleanup/merge": {
       POST: handle(async (req) => {
         const body = await readJson<{ field: unknown; from: unknown; to: unknown }>(req);
-        return json(await app.cleanup.merge(body.field, body.from, body.to));
+        return json(await cleanup.merge(app, body.field, body.from, body.to));
       }),
     },
     "/api/cleanup/author-search": {
       GET: handle(async (req) => {
         const params = new URL(req.url).searchParams;
-        return json(await app.cleanup.searchAuthors(params.get("q"), params.get("source")));
+        return json(await cleanup.searchAuthors(app, params.get("q"), params.get("source")));
       }),
     },
     "/api/cleanup/books": {
       GET: handle(async (req) => {
         const params = new URL(req.url).searchParams;
-        return json(await app.cleanup.booksWithName(params.get("field"), params.get("name")));
+        return json(await cleanup.booksWithName(app, params.get("field"), params.get("name")));
       }),
     },
     "/api/cleanup/swaps": {
-      GET: handle(async () => json(await app.cleanup.swapSuspects())),
-      POST: handle(async (req) => json(await app.cleanup.fixTitleAuthor((await readJson<{ items: unknown }>(req)).items))),
+      GET: handle(async () => json(await cleanup.swapSuspects(app))),
+      POST: handle(async (req) => json(await cleanup.fixTitleAuthor(app, (await readJson<{ items: unknown }>(req)).items))),
     },
     "/api/cleanup/aliases": {
-      GET: handle(() => json(app.cleanup.aliases())),
+      GET: handle(() => json(cleanup.listAliases(app))),
       DELETE: handle(async (req) => {
         const body = await readJson<{ field: unknown; variant: unknown }>(req);
-        app.cleanup.removeAlias(body.field, body.variant);
-        return json(app.cleanup.aliases());
+        cleanup.removeAlias(app, body.field, body.variant);
+        return json(cleanup.listAliases(app));
       }),
     },
     "/api/lookup/status": { GET: handle(() => json(app.lookup.status())) },
@@ -192,7 +195,7 @@ export function apiRoutes(app: AppContext) {
         return json(app.http.usage(Number.isFinite(since) && since > 0 ? since : Date.now()));
       }),
     },
-    "/api/isbndb/key": { GET: handle(async () => json(await app.lookup.isbndbKey())) },
+    "/api/isbndb/key": { GET: handle(async () => json(await lookups.isbndbKey(app))) },
     "/api/lookup/cancel": { POST: handle(() => json(app.lookup.cancel())) },
     "/api/lookup/retry-failed": { POST: handle(() => json(app.lookup.retryFailed(), { status: 202 })) },
     "/api/lookup/:id": {
@@ -200,31 +203,31 @@ export function apiRoutes(app: AppContext) {
         const p = new URL(req.url).searchParams;
         const source = p.get("source");
         if (source && !(LOOKUP_SOURCES as readonly string[]).includes(source)) throw new ValidationError(`source must be one of ${LOOKUP_SOURCES.join(", ")}`);
-        return json(await app.lookup.lookup(Number(req.params.id), { source: (source as LookupSource) || undefined, q: p.get("q") || undefined }));
+        return json(await lookups.find(app, Number(req.params.id), { source: (source as LookupSource) || undefined, q: p.get("q") || undefined }));
       }),
     },
     "/api/lookup/:id/covers": {
       GET: handle(async (req: Bun.BunRequest<"/api/lookup/:id/covers">) =>
-        json(await app.lookup.findCovers(Number(req.params.id), new URL(req.url).searchParams.get("q") || undefined)),
+        json(await lookups.findCovers(app, Number(req.params.id), new URL(req.url).searchParams.get("q") || undefined)),
       ),
     },
     "/api/books/:id/cover/from-url": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/cover/from-url">) => {
         const { url } = await readJson<{ url: unknown }>(req);
-        await app.lookup.setCoverFromUrl(Number(req.params.id), url);
+        await lookups.setCoverFromUrl(app, Number(req.params.id), url);
         return json(bookDetail(app, Number(req.params.id)));
       }),
     },
     "/api/books/:id/apply-metadata": {
       POST: handle(async (req: Bun.BunRequest<"/api/books/:id/apply-metadata">) =>
-        json(await app.lookup.apply(Number(req.params.id), await readJson<ApplyMetadataRequest>(req))),
+        json(await lookups.apply(app, Number(req.params.id), await readJson<ApplyMetadataRequest>(req))),
       ),
     },
-    "/api/review-queue": { GET: handle(() => json(app.lookup.reviewQueue())) },
-    "/api/review-queue/accept-fills": { POST: handle(async () => json(await app.lookup.acceptAllFills())) },
+    "/api/review-queue": { GET: handle(() => json(lookups.reviewItems(app))) },
+    "/api/review-queue/accept-fills": { POST: handle(async () => json(await lookups.acceptAllFills(app))) },
     "/api/review-queue/:id": {
       DELETE: handle((req: Bun.BunRequest<"/api/review-queue/:id">) => {
-        app.lookup.removeFromQueue(Number(req.params.id));
+        lookups.dismiss(app, Number(req.params.id));
         return json(app.lookup.status());
       }),
     },
@@ -245,7 +248,7 @@ function nameOf(body: { name: unknown }): string {
 }
 
 function bookFile(app: AppContext, req: Bun.BunRequest<"/api/books/:id/files/:hash">): Response {
-  const { abs, file } = app.bookService.fileOf(Number(req.params.id), req.params.hash);
+  const { abs, file } = books.fileOf(app, Number(req.params.id), req.params.hash);
   const download = new URL(req.url).searchParams.has("download");
   return serveFile(req, abs, {
     contentType: file.filename.toLowerCase().endsWith(".zip") || file.filename.toLowerCase().endsWith(".fbz") ? "application/zip" : CONTENT_TYPES[file.format],

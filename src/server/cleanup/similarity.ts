@@ -15,11 +15,6 @@ export function foldKey(s: string): string {
   return s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-/** Case-insensitive dedupe that keeps the first spelling and the order. */
-export function dedupeCaseless(list: readonly string[]): string[] {
-  return list.filter((x, i) => list.findIndex((y) => y.toLowerCase() === x.toLowerCase()) === i);
-}
-
 /** Folded words with punctuation removed; apostrophes join ("O'Brien" = "OBrien"). */
 function words(s: string): string[] {
   return foldKey(s)
@@ -48,7 +43,7 @@ function nameParts(name: string): { given: string[]; surname: string } {
 }
 
 /** Runs of single letters are joined, so "J. R. R.", "J.R.R." and "JRR" agree; real words never absorb them. */
-function joinInitials(w: string[]): string[] {
+function joinInitials(w: readonly string[]): string[] {
   return w.reduce<{ out: string[]; inRun: boolean }>(
     ({ out, inRun }, x) =>
       x.length !== 1
@@ -62,7 +57,7 @@ function joinInitials(w: string[]): string[] {
 export function shapeKey(s: string, field: CleanupField): string {
   if (field !== "authors") return words(s).join(" ");
   const { given, surname } = nameParts(s);
-  return [...joinInitials(given), surname].sort().join(" ");
+  return [...joinInitials(given), surname].toSorted().join(" ");
 }
 
 /** Edit distance with adjacent swaps (optimal string alignment); gives up past `max`. */
@@ -164,7 +159,7 @@ export function groupNames(entries: readonly FacetDto[], field: CleanupField): {
       const safeLinks = new Map(
         members.map((m) => [m, members.filter((o) => o !== m && SAFE.has(relation(m.name, o.name, field) ?? "similar")).length]),
       );
-      const main = [...members].sort(
+      const main = members.toSorted(
         (a, b) =>
           b.count - a.count ||
           safeLinks.get(b)! - safeLinks.get(a)! ||
@@ -179,14 +174,14 @@ export function groupNames(entries: readonly FacetDto[], field: CleanupField): {
           const match: NameMatchKind = m === main ? "main" : (relation(main.name, m.name, field) ?? "similar");
           return { name: m.name, books: m.count, match, preselected: PRESELECTED.has(match) };
         })
-        .sort((a, b) => KIND_ORDER[a.match] - KIND_ORDER[b.match] || b.books - a.books || collator.compare(a.name, b.name));
+        .toSorted((a, b) => KIND_ORDER[a.match] - KIND_ORDER[b.match] || b.books - a.books || collator.compare(a.name, b.name));
       return { main: main.name, variants };
     })
-    .sort((a, b) => strongest(a) - strongest(b) || collator.compare(a.main, b.main));
+    .toSorted((a, b) => strongest(a) - strongest(b) || collator.compare(a.main, b.main));
   const singles = components
     .filter((c) => c.length === 1)
     .map((c) => c[0]!)
-    .sort((a, b) => collator.compare(a.name, b.name));
+    .toSorted((a, b) => collator.compare(a.name, b.name));
   return { groups, singles };
 }
 

@@ -1,26 +1,26 @@
 /** Normalized book metadata as stored in the DB. */
 export interface BookMetadata {
-  title: string;
-  subtitle: string | null;
-  authors: string[];
-  isbn13: string | null;
-  doi: string | null;
-  publisher: string | null;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly authors: readonly string[];
+  readonly isbn13: string | null;
+  readonly doi: string | null;
+  readonly publisher: string | null;
   /** Free-text edition statement ("2", "2nd", "Revised"…). */
-  edition: string | null;
-  publishedDate: string | null;
-  year: number | null;
-  language: string | null;
-  pages: number | null;
-  description: string | null;
-  series: string | null;
-  seriesIndex: number | null;
-  tags: string[];
+  readonly edition: string | null;
+  readonly publishedDate: string | null;
+  readonly year: number | null;
+  readonly language: string | null;
+  readonly pages: number | null;
+  readonly description: string | null;
+  readonly series: string | null;
+  readonly seriesIndex: number | null;
+  readonly tags: readonly string[];
 }
 
 export interface CoverImage {
-  data: Uint8Array;
-  mime: string;
+  readonly data: Uint8Array;
+  readonly mime: string;
 }
 
 /** What an extractor found embedded in a file. Every field optional; values may still be junk. */

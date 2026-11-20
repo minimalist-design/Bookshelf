@@ -1,286 +1,231 @@
 # Bookshelf
 
-A self-hosted book manager for a directory of e-books: a Bun + TypeScript server with an HTTP API, and SQLite. The
-API ([docs/api.md](docs/api.md)) is the only interface; there is no web UI.
+A self-hosted manager for a folder of e-books. Point it at the folder where you keep your books and it catalogues them,
+reads their metadata, finds what's missing online, and keeps the filenames tidy. You use it through an HTTP API
+(described in [docs/api.md](docs/api.md)); there is no web interface (yet).
 
-**The filesystem is the library.** The chosen root directory is the library, each folder directly inside it is a
-bookshelf, and files directly in the root are *Unshelved*. The database stores metadata only — never *which* books
-exist. Delete a file in your file manager and it disappears from the library; copy one in and it appears.
+**Your folder is the library.** Each folder directly inside it is a bookshelf, and books lying in the top folder are
+*Unshelved*. Bookshelf never hides your files away: copy a book into the folder and it shows up, delete one in your file
+manager and it's gone. What Bookshelf adds — titles, authors, tags, series, ratings, notes, covers — is kept separately,
+so your files stay as they are.
 
-## Features
+## What it does
 
-- EPUB, PDF, CBZ, CBR, DJVU and FB2 (`.fb2`, `.fb2.zip`, `.fbz`).
-- Metadata from the file (EPUB OPF, PDF Info/XMP, ComicInfo.xml, DJVU, FB2), else from the filename
-  (`Title -- Author -- isbn13 … -- doi …`), merged per field.
-- One book can have several files (EPUB + PDF of the same ISBN/DOI are one book).
-- Live updates: a recursive watcher picks up files added, moved, renamed or removed outside the app.
-- Upload with duplicate detection; imported files are renamed `Author - Title [ISBN or DOI].ext`.
-- Full-text search, filters (format, tag, series, author, rating, missing data…), sorting, paging.
-- Editing (tags, series, rating, notes, cover…), merge/split, move between shelves, delete, file download.
-- Metadata lookups in ISBNdb (with an API key), Open Library and the DOI registries (Crossref, doi.org/DataCite) with
-  a field-by-field review, bulk lookups and a review queue.
-- Live events over a WebSocket (`/ws`): library status, changed books, lookup progress.
+- Reads EPUB, PDF, CBZ, CBR, DJVU and FB2 (`.fb2`, `.fb2.zip`, `.fbz`).
+- Takes each book's title, authors, ISBN or DOI and other details from the file itself, or from its filename when the
+  file has none.
+- Treats the EPUB and the PDF of the same book as one book with two files.
+- Notices files you add, move, rename or remove outside Bookshelf, as it happens.
+- Imports new books into a shelf, refuses duplicates, and names them `Author - Title [ISBN or DOI].ext`.
+- Searches titles, authors, series, tags, descriptions, ISBNs and DOIs, with filters (format, tag, series, author, rating,
+  missing data…) and sorting.
+- Lets you edit a book's details and cover, merge two entries into one or split one apart, move books between shelves,
+  delete them, and download their files.
+- Looks books up in Open Library, Crossref and the other DOI registries, and in ISBNdb if you have an API key. You
+  review each suggestion field by field before anything changes. Large batches go to a review queue.
+- Sends live updates over a WebSocket (`/ws`): changed books, scan and lookup progress.
 
 ## Requirements
 
-- [Bun](https://bun.sh) 1.4 or newer.
-- Optional tools (detected at startup, listed in `GET /api/settings`):
-  - `7z` (7-Zip) or `unrar` — CBR metadata, covers and reading.
-  - `djvused`, `ddjvu` (djvulibre) — DJVU metadata, covers and reading.
-  - `pdftoppm` (poppler) — PDF cover images.
+- To build it: [Bun](https://bun.sh) 1.4 or newer. The installed program doesn't need Bun.
+- Optional tools, used when found on your `PATH`:
+  - `7z` (7-Zip) or `unrar`, for CBR files;
+  - `djvused` and `ddjvu` (djvulibre), for DJVU files;
+  - `pdftoppm` (poppler), for PDF covers.
 
-  Without them those files are still listed, using their filename.
+  Without them those books are still listed, with what their filenames say. `GET /api/settings` shows which tools were
+  found.
 
-## Running
+## Installing
 
 ```sh
-bun install
-bun run dev        # development: hot reload (the URL is printed at startup)
-bun run start      # production
-bun run build      # single-file executable in dist/ (see below)
+make install
 ```
 
-Until a library directory is set, the library is empty. Set it with `PUT /api/settings` and
-`{"libraryRoot": "/path", "createLibraryRoot": true}` (`createLibraryRoot` creates a missing directory, parents
-included); `{"libraryRoot": null}` unlinks it (no files are deleted). Or fix it with `library_root` in the config file:
-a missing directory given there is created the first time the server starts with it; afterwards a missing directory is
-reported as unavailable (e.g. an unmounted drive).
+This builds a single `bookshelf` executable, installs it to `~/.local/bin/`, and sets up two files:
 
-### Upgrading from the version with the web UI
+- **The config file**, `~/.config/bookshelf/config.json`. If you already have one, you're asked whether to **Update**
+  it (the default: adds settings that are new in this version and changes nothing else), **Keep** it, or **Replace** it
+  with the defaults (the old file is backed up next to it, and its port is kept).
+- **The secrets file** for your ISBNdb API key. You're asked where to put it (default `~/.secrets/bookshelf.env`, readable
+  only by you). If it already exists you get the same Update / Keep / Replace choice; it's never emptied, and no
+  copies of it are made.
 
-That version's database can't be read: the schema was started over. Before running the new binary, stop the service and
-delete the data directory (`~/.local/share/bookshelf` unless `data_dir` says otherwise; the server refuses to start
-while the old database is there). In `make install`, choose **Replace** for the config (its `port` is kept).
+Then start it:
 
-### Configuration
+```sh
+bookshelf
+```
 
-Settings live in `~/.config/bookshelf/config.json` (`$XDG_CONFIG_HOME` is honoured), installed by `make install` from
-[`config.template.json`](config.template.json). Without the file the defaults below are used; empty values mean the
-default too. Paths may start with `~`.
+To run it as a service, use [ServiceMan](https://github.com/objectiveprover/ServiceMan): it reads what it needs from
+Bookshelf itself and restarts the service whenever you install a new version. Give it the secrets file as the
+service's environment file. Without ServiceMan, [`contrib/bookshelf.service`](contrib/bookshelf.service) is a plain
+systemd user unit.
+
+`make uninstall` removes the program and leaves your config, secrets and data alone.
+
+## First start
+
+The first time it starts, Bookshelf picks a free port between 20000 and 20999, saves it in the config file and prints
+the address. It uses that same port from then on; if another program has taken it, Bookshelf stops with an error rather
+than moving. To change it, edit `port` in the config file.
+
+Next, tell it where your books are, either with the API:
+
+```sh
+curl -X PUT http://localhost:20000/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"libraryRoot": "/home/me/Books", "createLibraryRoot": true}'
+```
+
+or by setting `library_root` in the config file. Bookshelf then scans the folder; large libraries take a while the
+first time, and `/ws` reports the progress. Unlinking the folder (`{"libraryRoot": null}`) never deletes any files.
+
+If the folder disappears later (an unmounted drive, say), Bookshelf reports the library as unavailable and forgets
+nothing.
+
+> **There is no login.** Bookshelf is meant for one person on a trusted network. Don't expose it to the internet
+> without an authenticating reverse proxy in front of it (one that also forwards the `/ws` WebSocket).
+> [CaddyMan](https://github.com/objectiveprover/CaddyMan) can set one up from what Bookshelf tells it.
+
+## Settings
+
+The config file is `~/.config/bookshelf/config.json` (`bookshelf config path` prints it). Leaving a value empty means
+the default.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `version` | — | Config format version; see `bookshelf config version` |
-| `library_root` | — | Library directory; overrides (and locks) the `libraryRoot` setting |
-| `data_dir` | `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf` | Database and cover images (must not be inside the library) |
-| `host` | `0.0.0.0` | Bind address |
-| `port` | `0` | HTTP port; `0` means not assigned yet (see [Port](#port)) |
-| `max_upload_mb` | `16384` | Largest accepted upload |
-| `isbndb_daily_limit` | `5000` | ISBNdb calls per day (your plan's quota) |
-| `isbndb_per_second` | `1` | ISBNdb requests per second (your plan's rate) |
+| `library_root` | — | Your books folder. When set here, it can't be changed through the API |
+| `data_dir` | `~/.local/share/bookshelf` | Where Bookshelf keeps its database and covers. Must not be inside the library |
+| `host` | `0.0.0.0` | Network address to listen on (`127.0.0.1` for this computer only) |
+| `port` | `0` | Port to listen on; `0` means "pick one on first start" |
+| `max_upload_mb` | `16384` | Largest file you can import through the API |
+| `isbndb_daily_limit` | `5000` | ISBNdb calls per day your plan allows |
+| `isbndb_per_second` | `1` | ISBNdb requests per second your plan allows |
 
 ```sh
-bookshelf config path       # where the config file is
-bookshelf config template   # the default config
-bookshelf config version    # the file's version and the current one
-bookshelf config update     # add settings that are new in this version (never changes existing ones)
+bookshelf config version    # is my config up to date?
+bookshelf config update     # add settings that are new in this version
+bookshelf config template   # show the defaults
 ```
 
-The server warns at startup when the config is older than the current version. (In development, use
-`bun src/server/index.ts config …`.)
+Bookshelf warns at startup when the config is from an older version.
 
-Secrets go in an env file outside the repo and `~/.config` (default `~/.secrets/bookshelf.env`, mode 600), given to
-the service with systemd's `EnvironmentFile=`. [`.env.example`](.env.example) lists them:
-
-| Variable | Meaning |
-|---|---|
-| `ISBNDB_API_KEY` | [ISBNdb](https://isbndb.com) API key. Optional: without it, lookups use Open Library and the DOI registries |
-
-In development, `bun` reads a `.env` file in the project directory (ignored by git). Tests never use a real key.
-
-#### Port
-
-The first start picks the first free port from 20000 to 20999 and writes it into the config as `port` (only that value
-changes; the rest of the file is left as it was). From then on Bookshelf always uses that port: if another program
-has taken it, Bookshelf exits with an error naming it instead of moving elsewhere. To change it, edit `port` by hand.
-
-#### Service info
-
-`bookshelf serviceman-info` prints what [ServiceMan](https://github.com/objectiveprover/ServiceMan) and
-[CaddyMan](https://github.com/objectiveprover/CaddyMan) need to set Bookshelf up: the command, port (`null` before the
-first start), health-check path, config and env file, and suggested reverse proxy settings. `bookshelf caddyman-info`
-is the same command (each tool asks with its own name). It reads only the config file, so it works before the service
-has ever run.
-
-The health-check path, `/api/health`, answers `200` while the server and its database work and `503` otherwise; it's
-what ServiceMan polls.
-
-> **There is no authentication.** Bookshelf is meant for a single user on a trusted network. Do not expose it to
-> the internet without putting it behind an authenticating reverse proxy (which must also forward the `/ws`
-> WebSocket).
-
-## Standalone executable and service
-
-`make build` compiles the server and the Bun runtime into a single self-contained executable, `./bookshelf`
-(~110 MB), which needs neither Bun nor `node_modules` to run. It is built for the current
-platform (`bun run build --target=linux-arm64 --outfile=dist/bookshelf-arm64` cross-compiles). It always runs in
-production mode. The optional tools are still found on `PATH`.
+Your ISBNdb API key goes in the secrets file, never in the config:
 
 ```sh
-make install      # build, then install ~/.local/bin/bookshelf, the config and the env file
-make uninstall    # remove ~/.local/bin/bookshelf (config and env file are kept)
-make clean        # remove ./bookshelf
+ISBNDB_API_KEY=your-key
 ```
 
-`make install`:
+It's optional: without it, lookups use Open Library and the DOI registries.
 
-- copies `config.template.json` to `~/.config/bookshelf/config.json` if there is none. If there is one, it asks:
-  **Update** it (default: `bookshelf config update` adds new settings and changes nothing else), **Keep** it, or
-  **Replace** it with the template after backing it up as `config.json.YYYYMMDD-HHMMSS.bak` (the old `port` is kept).
-  Without a terminal the existing config is always kept.
-- asks where the env file goes (default `~/.secrets/bookshelf.env`), creates the directory if needed (`~/.secrets`
-  with mode 700) and copies `.env.example` there with mode 600 if there is none. If there is one, it asks:
-  **Update** it (default: appends the variables from `.env.example` it lacks, with empty values; existing lines stay
-  as they are), **Keep** it, or **Replace** it with `.env.example`, keeping the values of the variables still listed
-  there. No backup of the env file is ever made, since it holds secrets, and only variable names are printed.
-  Without a terminal the existing env file is always kept.
-- doesn't create or restart a systemd unit: the service is managed with serviceman (give it the env file in the New
-  service form or with `M-x set-env-file`), which restarts it when the binary in `~/.local/bin` is replaced.
-  [`contrib/bookshelf.service`](contrib/bookshelf.service) is a plain systemd user unit for use without serviceman.
+## Using it
 
-At startup pdf.js prints warnings about `@napi-rs/canvas`, `DOMMatrix` and `Path2D`. They are harmless: the server
-only reads PDF metadata and never renders with pdf.js.
-
-## How it behaves
-
-### Filenames
-
-- **Import pattern** (files you add): `Title -- Author[, Author…][ -- anything]` plus optional `isbn13 9780…` and/or
-  `doi 10.xxxx_yyy` anywhere. DOIs use `_` instead of `/` (filenames cannot contain `/`). Extra ` -- ` segments, as in
-  Anna's Archive names, are ignored. Authors may be separated by `,`, `;`, `&` or `and`; `Last, First` is understood.
-- **Library pattern** (files the app names): `Author - Title [9780131103627].epub`, `A & B - Title …`,
-  `A et al. - Title [10.1145_3290605.3300857].pdf`. ` (2)` is added on collisions.
-- **`Title - Author`** names (common in downloads) are recognized: without an ID bracket, the split (at any ` - `) and
-  which side is the author come from which side reads as a person's name (`Fokkinga M M`, `Jane Austen`, an author
-  already in the library) and which as a title (lowercase words, articles, `Introduction`, `Part`…). When it can't
-  tell, the app's own `Author - Title` order is used. Names with an ID bracket are always read in the app's order.
-  Embedded metadata with the title and author swapped, or with the title copied into Author, is fixed the same way.
-- `GET /api/cleanup/swaps` lists unconfirmed books that look stored the wrong way round, with a fix (read again from
-  the filename when possible) that can be edited before `POST`ing it back; their files are renamed to match.
-- Hand-copied files keep their names until they're normalized (`/api/books/normalize-filenames`, per book, or a whole
-  shelf with `/api/maintenance/normalize`).
-
-### Metadata, confirmation and retention
-
-- Each file is linked to its metadata by SHA-256 content hash (with a hash cache keyed by path/size/mtime), falling
-  back to the ISBN/DOI. Renaming or moving files therefore never loses metadata.
-- Metadata is **confirmed** when accepted from Open Library / a DOI registry, or when you edit anything manually.
-- When a book's last file disappears (deleted in the app *or* outside it): confirmed metadata is **kept** (and
-  reconnected if the file returns); unconfirmed metadata is removed — it can always be re-read from the file.
-  Removals outside the app wait 10 s so that moves are not mistaken for deletions, and a scan that finds an empty
-  library (e.g. an unmounted drive) never removes anything.
-- Editing title, authors or ISBN/DOI renames the book's files. File contents are never modified.
-- Built-in **metadata rules** (`src/server/metadata/rules.ts`) reorganize what some publishers put in the wrong
-  fields: e.g. a Delphi Classics book tagged "Parts Edition 3 of 12" gets series *Parts Edition*, number 3 (the tag is
-  dropped), and the Delphi website is removed from its description. They apply to imported files and lookup results;
-  `POST /api/maintenance/rules` applies them to unconfirmed books already in the library.
-
-### Importing
-
-`POST /api/import` takes one file as the request body and copies it into the chosen shelf. An identical file, or the
-same ISBN/DOI in the same format, is rejected as a duplicate; a new format of an existing book is placed next to its
-other files. With `lookup=1` a new book is queued for a metadata lookup, whose results go to the review queue.
-Files can also simply be copied into the library directory: the watcher picks them up.
+Everything below is done through the API; [docs/api.md](docs/api.md) has the details.
 
 ### Shelves
 
-Shelves are created, renamed and deleted through `/api/shelves`. Deleting a shelf never deletes books: they move to
-Unshelved. If the folder holds other (non-book) files, nothing is changed and the answer lists them.
+Create, rename and delete shelves, or just make and remove folders yourself. Deleting a shelf never deletes books:
+they move to Unshelved. If the folder holds other files that aren't books, it's left alone and you're told which files
+they are.
 
-### Lookups
+### Adding books
 
-A lookup (`GET /api/lookup/:id`) searches by ISBN or DOI (Crossref, then doi.org), else by title/author. The ISBNdb
-records already kept in the database answer first (no call), then Open Library. Each candidate comes with a
-field-by-field diff (`fill` for missing fields, `conflict` for differing ones); `POST /api/books/:id/apply-metadata`
-applies the chosen fields. Bulk lookups (`POST /api/lookup/bulk`) fill the review queue. `GET /api/settings` says
-whether ISBNdb is set up, and `GET /api/isbndb/key` the plan and quota ISBNdb reports for the key.
+Import a book into a shelf through the API, or copy it into the library folder. An import is refused if the same file,
+or the same ISBN or DOI in the same format, is already there; a new format of a book you have joins its other files.
+You can ask for an imported book to be looked up straight away, with the results waiting in the review queue.
 
-ISBNdb's API is paid per call, so it is asked only when a lookup names it (`source=isbndb`): automatic and bulk lookups
-never call it. It has a daily quota (by default
-5,000 calls, reset at 00:00 UTC). Bookshelf counts the calls it makes and also reads what ISBNdb reports as left (calls made elsewhere with the same key
-count there): once either reaches zero it stops asking ISBNdb until the next day, and lookups carry on with Open
-Library. `GET /api/metadata-usage` shows today's ISBNdb calls against the limit.
+Files you copy in yourself keep their names until you ask Bookshelf to rename them, one book or a whole shelf at a time.
 
-Every record ISBNdb sends is kept in the database for good, exactly as sent (every field, including other editions'
-ISBNs, Thema subjects, genres and dimensions), whether or not the book is in the library: a title search asks for 100
-results (it costs one call either way) and keeps them all, wrong books included. Lookups read that copy first, even
-without a key:
+### Filenames
 
-- by ISBN: a book ISBNdb already sent, by any lookup or search, is answered from the copy;
-- by title and author: a kept record answers when it has exactly that title (subtitle aside) by an author with that
-  surname; for typed text, when its title is the text without its authors' names (so "Dune" isn't answered by a kept
-  *Dune Messiah*). Candidates read from the copy have `kept: true`.
+Bookshelf reads details from filenames like these:
 
-A lookup with `source=isbndb` asks ISBNdb itself and keeps its newer answer. ISBNs ISBNdb doesn't have are only
-remembered for a day, since it often adds books within hours.
+- `Title -- Author, Other Author -- anything else isbn13 9780131103627 doi 10.1145_3290605.3300857`: the style used
+  by Anna's Archive. Authors can be separated by `,`, `;`, `&` or `and`, and `Last, First` is understood. DOIs use `_`
+  instead of `/`, since filenames can't contain `/`.
+- `Author - Title [9780131103627].epub`: the style Bookshelf names files in. Several authors appear as
+  `A & B - Title` or `A et al. - Title`, and ` (2)` is added when two names would collide.
+- `Title - Author`, common in downloads: Bookshelf works out which side is the author and which the title. When it
+  can't tell, it assumes `Author - Title`.
 
-Each kept record's cover image is downloaded too, into `isbndb-covers/` in the data directory, placeholders included
-(ISBNdb can't say which covers are placeholders). Downloads run in the background, behind everything else, and cost no
-API quota; the full-size image is fetched while its temporary link is valid (2 hours), else the 450 px one. Applying an
-ISBNdb cover to a book uses the downloaded file. Clearing the lookup cache (`DELETE /api/maintenance/http-cache`)
-touches neither records nor covers; `GET /api/maintenance/stats` shows how many are kept. The API is described in
-[`docs/isbndb-openapi.json`](docs/isbndb-openapi.json).
+Some files have the title and author swapped in their own metadata. Bookshelf can list the books that look the wrong
+way round and suggest a fix you can adjust before applying.
 
-Requests stay under each service's published rate limit: one at a time per service, about 1 per second (ISBNdb as
-set in `isbndb_per_second`, and slower when its rate-limit headers say the window is spent; Open Library
-and Crossref allow about 2 per second once you set a contact email (`contactEmail` in `PUT /api/settings`), which also puts you in Crossref's
-"polite pool"). A lower limit advertised in Crossref's response headers takes precedence. Responses are cached for a
-week. If a service still answers *429 Too Many Requests*, nothing more is sent to it until its `Retry-After` time (or
-1 minute, doubling while it keeps refusing).
+### Editing
 
-Bulk lookups work through a queue stored in the database, one book at a time, so a large run takes a while and survives
-restarts. `GET /api/lookup/status` (and `lookup.status` events) shows how far it is and roughly how long is left. When a service rate-limits
-the queue, it pauses until the service accepts requests again and then continues, without counting the book as failed.
-The run can be stopped at any time (`/api/lookup/cancel`), and the failed books retried (`/api/lookup/retry-failed`).
+Changing a book's title, authors, ISBN or DOI renames its files to match. The contents of your files are never changed:
+covers, tags and other details live only in Bookshelf.
 
-### Reference data
+Some publishers put details in the wrong place (Delphi Classics, for example, files "Parts Edition 3 of 12" as a tag
+instead of a series). Bookshelf fixes the ones it knows about when it reads them, and can apply those fixes to books
+already in the library.
 
-Databases of authors and books from other sources, one SQLite file per source, in a format that doesn't depend on the
-source ([docs/reference-data-format.md](docs/reference-data-format.md)). A script per source builds the file; import it
-through `/api/reference`, by uploading it or by giving its path on the server (better for big files, which can
-exceed the upload limit). Bookshelf keeps its own copy as `reference/<source>.sqlite` in the data directory: importing
-a newer file of the same source replaces it, and the library database isn't touched. Names and titles in every
-language sit side by side, and each file keeps the raw responses it was made from.
+### Looking up metadata
 
-**Wikidata.** `scripts/wikidata/build.ts` lists people known to Open Library, writers, works with an author and editions
-of works (SPARQL), then fetches each one, and what it refers to (authors, series, editions, publishers), from the
-Wikidata API:
+Ask for a lookup on a book and Bookshelf searches by ISBN or DOI, or by title and author when there's neither. Each
+suggestion shows which fields would fill in something missing and which would replace what you have; you choose which
+to apply. A bulk lookup goes through many books in the background, and its suggestions wait in the review queue. It
+continues after a restart, can be stopped at any time, and its failures can be retried.
+
+Bookshelf stays within each service's published limits, so a large bulk lookup is slow on purpose: about a book a
+second. Giving it a contact email (`contactEmail` in the settings) lets Open Library and Crossref serve it about twice
+as fast.
+
+**ISBNdb** charges per call, so Bookshelf only asks it when you ask for it on a lookup; bulk lookups never use it.
+Bookshelf keeps count against your daily limit (and what ISBNdb says is left, which includes calls made elsewhere
+with the same key), and stops using it until the next day once it's spent. Everything ISBNdb sends is kept for good,
+covers included, so you never pay twice for the same answer, and later lookups use those records even without a key.
+
+### What happens when you delete a book
+
+Details you've confirmed — by accepting a lookup or editing anything yourself — are kept when a book's last file goes
+away, and come back if the file returns. Details that were only read from the file are dropped, since they can be read
+again. Renaming or moving files, inside Bookshelf or outside it, never loses anything.
+
+## Author and book reference data
+
+Bookshelf can import databases of authors and books from other sources, such as Wikidata, to learn names and titles
+in every language. You build the database file with a script and import it through the API, by uploading it or by
+giving its path on the server (better for large files). Importing a newer file from the same source replaces the old
+one. The file format is described in [docs/reference-data-format.md](docs/reference-data-format.md).
+
+To build the Wikidata file (this needs Bun and a copy of this repository):
 
 ```sh
+bun install
 bun scripts/wikidata/build.ts run wikidata.sqlite --langs en,es,ru --contact you@example.org
 bun scripts/wikidata/build.ts status wikidata.sqlite
 ```
 
-It takes many hours. Stop it at any time (Ctrl+C) and run the same command to resume; it marks the file complete when
-nothing is left. `--langs` (default: all languages) is fixed when the file is created; `--contact` goes in the
-User-Agent, as Wikimedia asks of automated clients; `--max-requests <n>` stops after n requests, to try it out.
-`normalize` rebuilds the rows from the stored responses without the network (`--partial` marks an unfinished file
-complete, to try it in Bookshelf). `bun scripts/reference-check.ts <file>` checks a file the way the import does. To
-update the data, build a new file and import it.
+It takes many hours. Stop it with Ctrl+C whenever you like and run the same command again to carry on; the file is
+marked complete when nothing is left.
 
-## Data directory
+- `--langs` picks the languages to keep (default: all). It's fixed when the file is first created.
+- `--contact` is sent to Wikimedia, who ask automated tools to give a way to reach their owner.
+- `--max-requests 100` stops after 100 requests, to try it out.
+- `normalize --partial` marks an unfinished file complete, to try it in Bookshelf before the build is done.
 
-```
-bookshelf.db                SQLite: metadata, tags, authors, review queue, kept ISBNdb records, caches
-covers/{id}.jpg             cover (≤1200×1800) and {id}.thumb.webp (≤320×480)
-isbndb-covers/{isbn13}.jpg  cover image of each kept ISBNdb record, as ISBNdb serves it
-reference/{source}.sqlite   imported reference data (authors and books from Wikidata and other sources)
-```
+`bun scripts/reference-check.ts wikidata.sqlite` checks a file the same way the import does.
 
-Back up the data directory to keep metadata you confirmed or edited, and the ISBNdb records and covers the daily quota
-paid for; the books themselves are just your files.
+## Backing up
+
+Your books are just your files. Back up the data directory (`~/.local/share/bookshelf` by default) to keep the details
+you've confirmed or edited, your covers, tags and notes, and the ISBNdb records you've paid for.
+
+## Troubleshooting
+
+- **Bookshelf won't start: the port is taken.** Another program is using the port saved in the config. Stop it, or
+  set a different `port`.
+- **Warnings about `@napi-rs/canvas`, `DOMMatrix` or `Path2D` at startup.** They're harmless and can be ignored.
+- **CBR, DJVU or PDF books show no cover or details.** Install the optional tools listed under
+  [Requirements](#requirements).
+- **`/api/health`** answers `200` while Bookshelf and its database are working, and `503` otherwise.
 
 ## Development
 
 ```sh
-bun test            # unit + integration tests (temp directories, recorded HTTP fixtures; no network)
-bun run typecheck
-```
-
-Layout:
-
-```
-src/server/   Bun.serve entry, API routes, services, library index/scanner/watcher, extractors, metadata sources
-src/shared/   API types (request and response shapes)
-tests/        bun test suites, fixture generators, recorded API responses
+bun install
+bun run dev    # run from source with hot reload
+bun test       # tests; no network needed
 ```

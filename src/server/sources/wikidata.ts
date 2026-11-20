@@ -39,7 +39,7 @@ function year(dateTime: string | undefined): string | null {
 }
 
 /** Only the facts needed to tell authors apart, for the given items that are people. */
-function peopleQuery(ids: string[]): string {
+function peopleQuery(ids: readonly string[]): string {
   const optional = [
     ["P569", "birth"],
     ["P570", "death"],
@@ -98,7 +98,7 @@ export async function wikidataAuthorSearch(http: HttpClient, q: string, limit = 
       const rank = [foldKey(m.name) === foldKey(q) ? 0 : byAlias ? 2 : 1, m.authorities.length ? 0 : 1, i];
       return { m, rank };
     })
-    .sort((a, b) => a.rank.reduce((d, x, k) => d || x - b.rank[k]!, 0))
+    .toSorted((a, b) => a.rank.reduce((d, x, k) => d || x - b.rank[k]!, 0))
     .map(({ m }) => m)
     .slice(0, limit);
 }

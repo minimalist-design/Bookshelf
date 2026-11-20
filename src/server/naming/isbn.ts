@@ -3,25 +3,26 @@ function compact(raw: string): string {
   return raw.replace(/[^0-9Xx]/g, "").toUpperCase();
 }
 
+/** ISBN-13 check digit of the first 12 digits (weights 1, 3, 1, 3, …). */
+function isbn13CheckDigit(core12: string): number {
+  const sum = [...core12].reduce((acc, d, i) => acc + Number(d) * (i % 2 === 0 ? 1 : 3), 0);
+  return (10 - (sum % 10)) % 10;
+}
+
 export function isValidIsbn13(isbn: string): boolean {
-  if (!/^\d{13}$/.test(isbn)) return false;
-  let sum = 0;
-  for (let i = 0; i < 12; i++) sum += Number(isbn[i]) * (i % 2 === 0 ? 1 : 3);
-  return (10 - (sum % 10)) % 10 === Number(isbn[12]);
+  return /^\d{13}$/.test(isbn) && isbn13CheckDigit(isbn.slice(0, 12)) === Number(isbn[12]);
 }
 
 export function isValidIsbn10(isbn: string): boolean {
-  if (!/^\d{9}[\dX]$/.test(isbn)) return false;
-  let sum = 0;
-  for (let i = 0; i < 10; i++) sum += (isbn[i] === "X" ? 10 : Number(isbn[i])) * (10 - i);
-  return sum % 11 === 0;
+  return (
+    /^\d{9}[\dX]$/.test(isbn) &&
+    [...isbn].reduce((acc, c, i) => acc + (c === "X" ? 10 : Number(c)) * (10 - i), 0) % 11 === 0
+  );
 }
 
 export function isbn10To13(isbn10: string): string {
   const core = "978" + isbn10.slice(0, 9);
-  let sum = 0;
-  for (let i = 0; i < 12; i++) sum += Number(core[i]) * (i % 2 === 0 ? 1 : 3);
-  return core + ((10 - (sum % 10)) % 10);
+  return core + isbn13CheckDigit(core);
 }
 
 /**

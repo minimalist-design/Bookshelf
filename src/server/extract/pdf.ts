@@ -34,6 +34,40 @@ function str(v: unknown): string | undefined {
   return undefined;
 }
 
+/** The first value that `parse` accepts. */
+function firstParsed(candidates: readonly unknown[], parse: (s: string) => string | null): string | undefined {
+  return candidates
+    .map(str)
+    .map((s) => (s ? parse(s) : null))
+    .find((v): v is string => !!v);
+}
+
+/** Info dictionary and XMP values (looked up through `xmp`) → metadata. */
+export function pdfInfoToRaw(info: PdfInfo, xmp: (key: string) => unknown, pages: number): RawMetadata {
+  const xmpCreators = xmp("dc:creator");
+  const creators = Array.isArray(xmpCreators) ? xmpCreators.map(str).filter((s): s is string => !!s) : [];
+  const infoAuthor = str(info.Author);
+  const subject = str(info.Subject);
+  const keywords = str(info.Keywords);
+  return {
+    pages,
+    title: str(xmp("dc:title")) ?? str(info.Title),
+    authors: creators.length ? creators : infoAuthor ? [infoAuthor] : [],
+    description: htmlToText(str(xmp("dc:description"))) ?? undefined,
+    publisher: str(xmp("dc:publisher")),
+    language: str(xmp("dc:language"))?.toLowerCase(),
+    doi: firstParsed(
+      [xmp("prism:doi"), xmp("pdfx:doi"), xmp("crossmark:doi"), xmp("dc:identifier"), subject, keywords],
+      (s) => normalizeDoi(s) ?? normalizeDoi(DOI_IN_TEXT.exec(s)?.[1]),
+    ),
+    isbn13: firstParsed(
+      [xmp("prism:isbn"), xmp("dc:identifier"), subject, keywords],
+      (s) => normalizeIsbn(s) ?? normalizeIsbn(ISBN_IN_TEXT.exec(s)?.[1]),
+    ),
+    publishedDate: normalizeDate(str(xmp("prism:publicationdate")) ?? str(xmp("prism:coverdate"))) ?? undefined,
+  };
+}
+
 /**
  * Reads the Info dictionary and XMP packet without loading the whole file:
  * pdf.js fetches only the byte ranges it needs through a range transport.
@@ -60,38 +94,10 @@ export async function extractPdf(path: string, pdftoppm: string | null): Promise
     const doc = await task.promise;
     const { info, metadata } = (await doc.getMetadata()) as { info: PdfInfo; metadata: { get(k: string): unknown } | null };
     const xmp = (k: string) => (metadata ? metadata.get(k) : undefined);
-
-    const out: RawMetadata = { pages: doc.numPages };
-    out.title = str(xmp("dc:title")) ?? str(info.Title);
-    const xmpCreators = xmp("dc:creator");
-    const creators = Array.isArray(xmpCreators) ? xmpCreators.map(str).filter((s): s is string => !!s) : [];
-    out.authors = creators.length ? creators : str(info.Author) ? [str(info.Author)!] : [];
-    out.description = htmlToText(str(xmp("dc:description"))) ?? undefined;
-    out.publisher = str(xmp("dc:publisher"));
-    out.language = str(xmp("dc:language"))?.toLowerCase();
-
-    const subject = str(info.Subject);
-    const keywords = str(info.Keywords);
-    const doiCandidates = [xmp("prism:doi"), xmp("pdfx:doi"), xmp("crossmark:doi"), xmp("dc:identifier"), subject, keywords];
-    for (const c of doiCandidates) {
-      const s = str(c);
-      const doi = s ? normalizeDoi(s) ?? normalizeDoi(DOI_IN_TEXT.exec(s)?.[1]) : null;
-      if (doi) {
-        out.doi = doi;
-        break;
-      }
-    }
-    for (const c of [xmp("prism:isbn"), xmp("dc:identifier"), subject, keywords]) {
-      const s = str(c);
-      const isbn = s ? normalizeIsbn(s) ?? normalizeIsbn(ISBN_IN_TEXT.exec(s)?.[1]) : null;
-      if (isbn) {
-        out.isbn13 = isbn;
-        break;
-      }
-    }
-    out.publishedDate = normalizeDate(str(xmp("prism:publicationdate")) ?? str(xmp("prism:coverdate"))) ?? undefined;
-    if (pdftoppm) out.loadCover = () => renderFirstPage(pdftoppm, path);
-    return out;
+    return {
+      ...pdfInfoToRaw(info, xmp, doc.numPages),
+      ...(pdftoppm ? { loadCover: () => renderFirstPage(pdftoppm, path) } : {}),
+    };
   } finally {
     await task.destroy().catch(() => undefined);
   }

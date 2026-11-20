@@ -64,13 +64,19 @@ export function tilde(p: string, home = homedir()): string {
   return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
 }
 
-function parseObject(path: string, text: string): Record<string, unknown> {
-  let value: unknown;
+/** The parsed value, or the parser's complaint. */
+function parseJson(text: string): { value: unknown } | { error: string } {
   try {
-    value = JSON.parse(text);
+    return { value: JSON.parse(text) };
   } catch (err) {
-    throw new ConfigError(`${tilde(path)}: invalid JSON: ${err instanceof Error ? err.message : err}`);
+    return { error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function parseObject(path: string, text: string): Record<string, unknown> {
+  const parsed = parseJson(text);
+  if ("error" in parsed) throw new ConfigError(`${tilde(path)}: invalid JSON: ${parsed.error}`);
+  const value = parsed.value;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ConfigError(`${tilde(path)}: expected a JSON object`);
   }
@@ -81,13 +87,11 @@ function parseObject(path: string, text: string): Record<string, unknown> {
 export function readConfigFile(path: string = configPath()): ConfigFileSettings {
   if (!existsSync(path)) return {};
   const raw = parseObject(path, readFileSync(path, "utf8"));
-  for (const [key, type] of Object.entries(TYPES)) {
+  const wrong = Object.entries(TYPES).find(([key, type]) => {
     const v = raw[key];
-    if (v === undefined || v === null) continue;
-    if (typeof v !== type || (type === "number" && !Number.isFinite(v))) {
-      throw new ConfigError(`${tilde(path)}: "${key}" must be a ${type}`);
-    }
-  }
+    return v !== undefined && v !== null && (typeof v !== type || (type === "number" && !Number.isFinite(v)));
+  });
+  if (wrong) throw new ConfigError(`${tilde(path)}: "${wrong[0]}" must be a ${wrong[1]}`);
   const port = raw.port;
   if (typeof port === "number" && (!Number.isInteger(port) || port < 0 || port > 65535)) {
     throw new ConfigError(`${tilde(path)}: "port" must be 0 (one is picked on first start) or 1–65535`);
@@ -126,9 +130,11 @@ export function updateConfigFile(path: string = configPath()): UpdateResult {
   if (added.length === 0 && newVersion === raw.version) return { created: false, added, oldVersion, newVersion };
 
   // `version` first (where the template has it), then the existing keys in their order, then the new ones.
-  const out: Record<string, unknown> = { version: newVersion };
-  for (const [k, v] of Object.entries(raw)) if (k !== "version") out[k] = v;
-  for (const k of added) out[k] = TEMPLATE[k];
+  const out = Object.fromEntries([
+    ["version", newVersion],
+    ...Object.entries(raw).filter(([k]) => k !== "version"),
+    ...added.map((k) => [k, TEMPLATE[k]]),
+  ]);
   writeAtomic(path, JSON.stringify(out, null, 2) + "\n");
   return { created: false, added, oldVersion, newVersion };
 }
@@ -152,22 +158,15 @@ export function writeConfigPort(path: string, port: number): void {
 export function setPortText(text: string, port: number): string | null {
   const before = JSON.parse(text) as Record<string, unknown>;
   const re = /("port"\s*:\s*)(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|null)/;
-  let out: string;
-  if ("port" in before) {
-    out = text.replace(re, `$1${port}`);
-  } else {
-    const open = text.indexOf("{");
-    const empty = Object.keys(before).length === 0;
-    out = text.slice(0, open + 1) + `\n  "port": ${port}` + (empty ? "\n" : ",") + text.slice(open + 1).replace(/^\s*(?=\})/, "");
-  }
+  const open = text.indexOf("{");
+  const empty = Object.keys(before).length === 0;
+  const out =
+    "port" in before
+      ? text.replace(re, `$1${port}`)
+      : text.slice(0, open + 1) + `\n  "port": ${port}` + (empty ? "\n" : ",") + text.slice(open + 1).replace(/^\s*(?=\})/, "");
   // Only accept the result when it is exactly the old config with the new port.
-  let after: unknown;
-  try {
-    after = JSON.parse(out);
-  } catch {
-    return null;
-  }
-  return Bun.deepEquals(after, { ...before, port }) ? out : null;
+  const after = parseJson(out);
+  return "value" in after && Bun.deepEquals(after.value, { ...before, port }) ? out : null;
 }
 
 function writeAtomic(path: string, text: string): void {

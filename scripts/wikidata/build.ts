@@ -174,6 +174,26 @@ interface Fetcher {
   readonly count: number;
 }
 
+/** What one request came to: the answer, or a problem worth retrying (after `retryAfterS`, when the server said). */
+type Attempt =
+  | { kind: "ok"; status: number; contentType: string | null; body: string }
+  | { kind: "retry"; problem: string; retryAfterS: number | null };
+
+/**
+ * How to treat an answer: success; a temporary problem (429, 5xx, Wikidata's "maxlag": the servers are busy); or
+ * anything else, which no retry fixes (null).
+ */
+export function classifyAnswer(status: number, body: string, retryAfter: string | null): Attempt | null {
+  const ok = status >= 200 && status < 300;
+  const maxlag = ok && body.startsWith('{"error":{"code":"maxlag"');
+  if (ok && !maxlag) return { kind: "ok", status, contentType: null, body };
+  if (status !== 429 && status < 500 && !maxlag) return null;
+  return { kind: "retry", problem: maxlag ? "servers busy (maxlag)" : `HTTP ${status}`, retryAfterS: Number(retryAfter) || null };
+}
+
+/** Seconds to wait before the next attempt: as the server asked, else doubling, at most 5 minutes. */
+export const retryWaitSeconds = (retryAfterS: number | null, attempt: number): number => retryAfterS ?? Math.min(300, 2 ** attempt);
+
 /**
  * Serial GETs at each host's pace, with a User-Agent naming the tool (and you, with --contact). Retries what
  * is worth retrying (429, 5xx, network errors, Wikidata's "maxlag": the servers are busy), waiting as asked.
@@ -189,6 +209,17 @@ function makeFetcher(contact: string | null, maxRequests: number, stopped: () =>
     last.set(host, Date.now());
   };
 
+  /** One request; a network error is worth retrying, an answer no retry fixes is thrown. */
+  const fetchOnce = async (url: string, accept: string, host: string): Promise<Attempt> => {
+    const res = await fetch(url, { headers: { "User-Agent": userAgent, Accept: accept, "Accept-Encoding": "gzip" } }).catch((err: Error) => err);
+    if (res instanceof Error) return { kind: "retry", problem: `network error: ${res.message}`, retryAfterS: null };
+    const body = await res.text().catch((err: Error) => err);
+    if (body instanceof Error) return { kind: "retry", problem: `network error: ${body.message}`, retryAfterS: null };
+    const answer = classifyAnswer(res.status, body, res.headers.get("retry-after"));
+    if (!answer) throw new Error(`${res.status} from ${host}: ${body.slice(0, 300)}`);
+    return answer.kind === "ok" ? { ...answer, contentType: res.headers.get("content-type") } : answer;
+  };
+
   return {
     get count() {
       return count;
@@ -196,27 +227,14 @@ function makeFetcher(contact: string | null, maxRequests: number, stopped: () =>
     async get(url, accept) {
       const host = new URL(url).host;
       for (let attempt = 1; ; attempt++) {
-        if (stopped()) throw new StopRequested();
-        if (count >= maxRequests) throw new StopRequested();
+        if (stopped() || count >= maxRequests) throw new StopRequested();
         await pace(host);
         count++;
-        let retryAfter: number | null = null;
-        let problem: string;
-        try {
-          const res = await fetch(url, { headers: { "User-Agent": userAgent, Accept: accept, "Accept-Encoding": "gzip" } });
-          const body = await res.text();
-          const maxlag = res.ok && body.startsWith('{"error":{"code":"maxlag"');
-          if (res.ok && !maxlag) return { status: res.status, contentType: res.headers.get("content-type"), body };
-          if (res.status !== 429 && res.status < 500 && !maxlag) throw new Error(`${res.status} from ${host}: ${body.slice(0, 300)}`);
-          retryAfter = Number(res.headers.get("retry-after")) || null;
-          problem = maxlag ? "servers busy (maxlag)" : `HTTP ${res.status}`;
-        } catch (err) {
-          if (err instanceof Error && /^\d{3} from /.test(err.message)) throw err;
-          problem = `network error: ${(err as Error).message}`;
-        }
-        if (attempt >= MAX_ATTEMPTS) throw new Error(`${host} kept failing (${problem}); run again later to resume`);
-        const waitS = retryAfter ?? Math.min(300, 2 ** attempt);
-        console.log(`  ${problem}; waiting ${waitS} s (attempt ${attempt} of ${MAX_ATTEMPTS})`);
+        const answer = await fetchOnce(url, accept, host);
+        if (answer.kind === "ok") return answer;
+        if (attempt >= MAX_ATTEMPTS) throw new Error(`${host} kept failing (${answer.problem}); run again later to resume`);
+        const waitS = retryWaitSeconds(answer.retryAfterS, attempt);
+        console.log(`  ${answer.problem}; waiting ${waitS} s (attempt ${attempt} of ${MAX_ATTEMPTS})`);
         await Bun.sleep(waitS * 1000);
       }
     },
@@ -298,7 +316,7 @@ async function discover(db: Database, http: Fetcher, seed: (typeof SEEDS)[number
   db.transaction(() => {
     storeRawResponse(db, { url, status: res.status, contentType: res.contentType, body: res.body });
     const queue = db.query("INSERT OR IGNORE INTO build_queue (id, role) VALUES (?, ?)");
-    items.forEach((id) => queue.run(id, seed.role));
+    for (const id of items) queue.run(id, seed.role);
     db.query(
       `INSERT INTO build_seeds (name, next_offset, done) VALUES (?1, ?2, ?3)
        ON CONFLICT(name) DO UPDATE SET next_offset = ?2, done = ?3`,
@@ -332,14 +350,14 @@ async function fetchBatch(db: Database, http: Fetcher, role: Role, batch: number
     const responseId = storeRawResponse(db, { url, status: res.status, contentType: res.contentType, body: res.body });
     db.query("INSERT INTO build_fetches (response_id, role) VALUES (?, ?)").run(responseId, role);
     const mark = db.query("UPDATE build_queue SET state = ?, response_id = ? WHERE id = ? AND role = ?");
-    ids.forEach((id) => mark.run(answered.has(id) ? "done" : "missing", answered.has(id) ? responseId : null, id, role));
+    for (const id of ids) mark.run(answered.has(id) ? "done" : "missing", answered.has(id) ? responseId : null, id, role);
     // A merged item answers under its new ID: that one counts as fetched too.
     const done = db.query("INSERT INTO build_queue (id, role, state, response_id) VALUES (?, ?, 'done', ?) ON CONFLICT DO UPDATE SET state = 'done', response_id = excluded.response_id");
-    entities.filter((e) => !ids.includes(e.id)).forEach((e) => done.run(e.id, role, responseId));
+    for (const e of entities.filter((e) => !ids.includes(e.id))) done.run(e.id, role, responseId);
     const redirect = db.query("INSERT OR REPLACE INTO build_redirects (from_id, to_id) VALUES (?, ?)");
-    redirects.forEach(([from, to]) => redirect.run(from, to));
+    for (const [from, to] of redirects) redirect.run(from, to);
     const queue = db.query("INSERT OR IGNORE INTO build_queue (id, role) VALUES (?, ?)");
-    refs.forEach((r) => queue.run(r.id, r.role));
+    for (const r of refs) queue.run(r.id, r.role);
   })();
   const pending = (db.query("SELECT COUNT(*) AS n FROM build_queue WHERE state = 'pending'").get() as { n: number }).n;
   console.log(`fetch ${role}: ${entities.length} of ${ids.length} items, ${refs.length} references · ${pending.toLocaleString("en")} waiting`);
@@ -388,26 +406,26 @@ function* responsePages(db: Database, roles: readonly Role[], pageSize = 200): G
 /** Rebuild every row from the stored responses (the raw responses and the build tables stay as they are). */
 export function normalize(db: Database): void {
   const langs = langSet(readMeta(db));
-  db.transaction(() => DATA_TABLES.forEach((t) => db.exec(`DELETE FROM ${t}`)))();
+  db.transaction(() => {
+    for (const t of DATA_TABLES) db.exec(`DELETE FROM ${t}`);
+  })();
 
-  const publishers = new Map<string, string>();
-  for (const page of responsePages(db, ["publisher"])) {
-    for (const r of page) for (const e of responseEntities(JSON.parse(rawBodyText(r)))) publishers.set(e.id, pickText(e.labels) ?? "");
-  }
+  const entitiesOf = (r: StoredResponse) => responseEntities(JSON.parse(rawBodyText(r)));
+  // A page at a time: the responses can be large, only the names are kept.
+  const publishers = new Map(
+    responsePages(db, ["publisher"]).flatMap((page) => page.flatMap((r) => entitiesOf(r).map((e) => [e.id, pickText(e.labels) ?? ""] as const))),
+  );
   const publisherName = (id: string) => publishers.get(id) || null;
 
   const statements = new Map<string, ReturnType<Database["query"]>>();
-  let entities = 0;
-  for (const page of responsePages(db, ROLES.filter((r) => r !== "publisher"))) {
+  /** Insert one page's rows in one transaction; returns how many entities it held. */
+  const insertPage = (page: StoredResponse[]): number =>
     db.transaction(() => {
-      for (const r of page) {
-        for (const e of responseEntities(JSON.parse(rawBodyText(r)))) {
-          insertRows(db, entityRows(e, r.role, langs, publisherName, r.id), statements);
-          entities++;
-        }
-      }
+      const found = page.flatMap((r) => entitiesOf(r).map((e) => ({ e, r })));
+      for (const { e, r } of found) insertRows(db, entityRows(e, r.role, langs, publisherName, r.id), statements);
+      return found.length;
     })();
-  }
+  const entities = responsePages(db, ROLES.filter((r) => r !== "publisher")).reduce((n, page) => n + insertPage(page), 0);
 
   // Point references at merged items' new IDs, then drop what points at nothing fetched.
   db.transaction(() =>

@@ -2,13 +2,14 @@ import type { AppContext } from "../app.ts";
 import type { SettingsDto, SettingsUpdate } from "../../shared/types.ts";
 import { existsSync } from "node:fs";
 import { createLibraryRoot, validateLibraryRoot, ValidationError } from "../library/paths.ts";
+import * as settingsRepo from "../db/repo/settings.ts";
 
 export function getSettings(app: AppContext): SettingsDto {
   const t = app.tools;
   return {
     libraryRoot: app.libraryRoot(),
     libraryRootFromConfig: app.config.configLibraryRoot !== null,
-    contactEmail: app.settings.get("contactEmail"),
+    contactEmail: settingsRepo.get(app.db, "contactEmail"),
     dataDir: app.config.dataDir,
     tools: {
       sevenZip: !!t.sevenZip,
@@ -30,14 +31,15 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function updateSettings(app: AppContext, update: SettingsUpdate): SettingsDto {
   if (update.libraryRoot !== undefined) {
     if (app.config.configLibraryRoot) throw new ValidationError("Library root is set in the config file (library_root)");
-    let root: string | null = null; // null unlinks the library only: files and directories stay as they are
-    if (update.libraryRoot !== null) {
-      root = update.createLibraryRoot
-        ? createLibraryRoot(update.libraryRoot, app.config.dataDir)
-        : validateLibraryRoot(update.libraryRoot, app.config.dataDir);
-    }
-    const changed = root !== app.settings.get("libraryRoot");
-    app.settings.set("libraryRoot", root);
+    // null unlinks the library only: files and directories stay as they are.
+    const root =
+      update.libraryRoot === null
+        ? null
+        : update.createLibraryRoot
+          ? createLibraryRoot(update.libraryRoot, app.config.dataDir)
+          : validateLibraryRoot(update.libraryRoot, app.config.dataDir);
+    const changed = root !== settingsRepo.get(app.db, "libraryRoot");
+    settingsRepo.set(app.db, "libraryRoot", root);
     // Re-index in the background; clients follow progress via library.status events.
     // With no root, open() only stops watching and clears the in-memory index.
     if (changed) app.library.open(root).catch((err) => console.error("Library scan failed:", err));
@@ -45,7 +47,7 @@ export function updateSettings(app: AppContext, update: SettingsUpdate): Setting
   if (update.contactEmail !== undefined) {
     const email = update.contactEmail?.trim() || null;
     if (email && !EMAIL.test(email)) throw new ValidationError("Invalid email address");
-    app.settings.set("contactEmail", email);
+    settingsRepo.set(app.db, "contactEmail", email);
   }
   return getSettings(app);
 }
@@ -57,7 +59,7 @@ export function updateSettings(app: AppContext, update: SettingsUpdate): Setting
 export function prepareConfigLibraryRoot(app: AppContext): void {
   const root = app.config.configLibraryRoot;
   // The setting key predates the config file (the root used to come from an environment variable).
-  if (!root || app.settings.get("envLibraryRootSeen") === root) return;
+  if (!root || settingsRepo.get(app.db, "envLibraryRootSeen") === root) return;
   if (!existsSync(root)) {
     try {
       createLibraryRoot(root, app.config.dataDir);
@@ -67,5 +69,5 @@ export function prepareConfigLibraryRoot(app: AppContext): void {
       return; // retry on next start
     }
   }
-  app.settings.set("envLibraryRootSeen", root);
+  settingsRepo.set(app.db, "envLibraryRootSeen", root);
 }

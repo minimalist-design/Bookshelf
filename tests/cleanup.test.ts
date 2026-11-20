@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiRoutes } from "../src/server/api/router.ts";
-import { createApp, type AppContext } from "../src/server/app.ts";
+import type { AppContext } from "../src/server/app.ts";
 import { displayOrder, editDistance, foldKey, groupNames, relation, shapeKey } from "../src/server/cleanup/similarity.ts";
-import { loadConfig } from "../src/server/config.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import type { CleanupField, MetadataCandidate } from "../src/shared/types.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
+import * as lookups from "../src/server/services/lookup/lookup.ts";
+import * as books from "../src/server/services/books.ts";
+import * as cleanup from "../src/server/services/cleanup.ts";
+import { closeTestApp, scratchDir, SLOW_RETENTION, testApp } from "./fixtures.ts";
 
 const facets = (...pairs: [string, number][]) => pairs.map(([name, count]) => ({ name, count }));
 
@@ -118,9 +121,7 @@ describe("name cleanup service", () => {
   let wikidata: "ok" | "empty" | "down";
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "bookshelf-cleanup-"));
-    root = join(tmp, "library");
-    mkdirSync(join(root, "S"), { recursive: true });
+    ({ tmp, root } = scratchDir("cleanup", ["S"]));
     urls = [];
     wikidata = "ok";
     const fetchImpl = (async (input: string | URL | Request) => {
@@ -132,17 +133,10 @@ describe("name cleanup service", () => {
       if (/query\.wikidata\.org\/sparql/.test(url)) return Response.json(WIKIDATA_PEOPLE);
       return new Response("unexpected", { status: 500 });
     }) as typeof fetch;
-    app = createApp(loadConfig({ data_dir: join(tmp, "data") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 60_000 },
-      http: { fetchImpl, sleep: async () => {} },
-    });
+    app = testApp(tmp, {}, { library: SLOW_RETENTION, http: { fetchImpl, sleep: async () => {} } });
   });
 
-  afterEach(async () => {
-    await app.library.close();
-    app.db.close();
-    rmSync(tmp, { recursive: true, force: true });
-  });
+  afterEach(() => closeTestApp(app, tmp));
 
   const put = (rel: string) => writeFileSync(join(root, rel), rel);
   const idOf = (rel: string) => app.library.index.get(rel)!.bookId;
@@ -157,28 +151,28 @@ describe("name cleanup service", () => {
     const persuasion = idOf("S/Persuasion -- Austen, Jane.epub");
     const sanditon = idOf("S/Sanditon -- Jane Austen.epub");
     // Persuasion is confirmed (a manual edit) and lists two spellings that will become one.
-    await app.bookService.update(persuasion, { authors: ["Jane Austin", "Jane Austen"] });
+    await books.update(app, persuasion, { authors: ["Jane Austin", "Jane Austen"] });
 
-    const before = await app.cleanup.groups("authors");
+    const before = await cleanup.groups(app, "authors");
     expect(before.groups.map((g) => g.variants.map((v) => v.name))).toEqual([["Jane Austen", "JANE AUSTEN", "Jane Austin"]]);
     // Each spelling lists the books that use it, by title.
-    expect(await app.cleanup.booksWithName("authors", "Jane Austen")).toEqual([
+    expect(await cleanup.booksWithName(app, "authors", "Jane Austen")).toEqual([
       { id: persuasion, title: "Persuasion", authors: ["Jane Austin", "Jane Austen"] },
       { id: sanditon, title: "Sanditon", authors: ["Jane Austen"] },
     ]);
-    expect((await app.cleanup.booksWithName("authors", "JANE AUSTEN")).map((b) => b.id)).toEqual([emma]);
-    await expect(app.cleanup.booksWithName("genres", "x")).rejects.toThrow(ValidationError);
+    expect((await cleanup.booksWithName(app, "authors", "JANE AUSTEN")).map((b) => b.id)).toEqual([emma]);
+    await expect(cleanup.booksWithName(app, "genres", "x")).rejects.toThrow(ValidationError);
 
-    const r = await app.cleanup.merge("authors", ["JANE AUSTEN", "Jane Austin"], "Jane Austen");
+    const r = await cleanup.merge(app, "authors", ["JANE AUSTEN", "Jane Austin"], "Jane Austen");
     expect(r).toMatchObject({ books: 2, errors: [] });
     expect(r.renamed.map((x) => x.to).sort()).toEqual(["S/Jane Austen - Emma.epub", "S/Jane Austen - Persuasion.epub"]);
-    expect(app.books.get(emma)).toMatchObject({ authors: ["Jane Austen"], confirmedSource: null });
-    expect(app.books.get(persuasion)).toMatchObject({ authors: ["Jane Austen"], confirmedSource: "manual" });
-    expect(app.books.get(sanditon)!.authors).toEqual(["Jane Austen"]);
+    expect(bookRepo.get(app.db, emma)).toMatchObject({ authors: ["Jane Austen"], confirmedSource: null });
+    expect(bookRepo.get(app.db, persuasion)).toMatchObject({ authors: ["Jane Austen"], confirmedSource: "manual" });
+    expect(bookRepo.get(app.db, sanditon)!.authors).toEqual(["Jane Austen"]);
     expect(filesOf(emma)).toEqual(["S/Jane Austen - Emma.epub"]);
     expect(existsSync(join(root, "S/Jane Austen - Emma.epub"))).toBe(true);
-    expect((await app.cleanup.groups("authors")).groups).toEqual([]);
-    expect(app.cleanup.aliases()).toEqual([
+    expect((await cleanup.groups(app, "authors")).groups).toEqual([]);
+    expect(cleanup.listAliases(app)).toEqual([
       { field: "authors", variant: "JANE AUSTEN", canonical: "Jane Austen" },
       { field: "authors", variant: "Jane Austin", canonical: "Jane Austen" },
     ]);
@@ -187,25 +181,25 @@ describe("name cleanup service", () => {
     put("S/Lady Susan -- JANE AUSTEN.epub");
     put("S/Love and Freindship -- jane austin.epub");
     await app.library.rescan();
-    expect(app.books.get(idOf("S/Lady Susan -- JANE AUSTEN.epub"))!.authors).toEqual(["Jane Austen"]);
-    expect(app.books.get(idOf("S/Love and Freindship -- jane austin.epub"))!.authors).toEqual(["Jane Austen"]);
+    expect(bookRepo.get(app.db, idOf("S/Lady Susan -- JANE AUSTEN.epub"))!.authors).toEqual(["Jane Austen"]);
+    expect(bookRepo.get(app.db, idOf("S/Love and Freindship -- jane austin.epub"))!.authors).toEqual(["Jane Austen"]);
   });
 
   test("aliases never chain, apply to any case of a known spelling, and can be forgotten", async () => {
     put("S/A -- Ann Radcliffe.epub");
     await app.library.open(root);
-    await app.cleanup.merge("authors", ["Ann Radcliffe"], "Anne Radcliffe");
-    await app.cleanup.merge("authors", ["Anne Radcliffe"], "Ann Ward Radcliffe");
-    expect(app.cleanup.aliases().map((a) => [a.variant, a.canonical])).toEqual([
+    await cleanup.merge(app, "authors", ["Ann Radcliffe"], "Anne Radcliffe");
+    await cleanup.merge(app, "authors", ["Anne Radcliffe"], "Ann Ward Radcliffe");
+    expect(cleanup.listAliases(app).map((a) => [a.variant, a.canonical])).toEqual([
       ["Ann Radcliffe", "Ann Ward Radcliffe"],
       ["Anne Radcliffe", "Ann Ward Radcliffe"],
     ]);
     const meta = { authors: ["ANN RADCLIFFE", "ann ward radcliffe", "Someone"], tags: [], series: null, publisher: null };
     expect(app.aliases.apply(meta).authors).toEqual(["Ann Ward Radcliffe", "Someone"]);
 
-    app.cleanup.removeAlias("authors", "Ann Radcliffe");
+    cleanup.removeAlias(app, "authors", "Ann Radcliffe");
     expect(app.aliases.apply(meta).authors).toEqual(["ANN RADCLIFFE", "Ann Ward Radcliffe", "Someone"]);
-    expect(() => app.cleanup.removeAlias("genres", "x")).toThrow(ValidationError);
+    expect(() => cleanup.removeAlias(app, "genres", "x")).toThrow(ValidationError);
   });
 
   test("tags (stored without case), series and publishers merge too", async () => {
@@ -213,10 +207,10 @@ describe("name cleanup service", () => {
     put("S/Two -- Someone.epub");
     await app.library.open(root);
     const [one, two] = [idOf("S/One -- Someone.epub"), idOf("S/Two -- Someone.epub")];
-    await app.bookService.update(one, { tags: ["science fiction", "Space"], series: "Dune Chronicles", publisher: "ACE" });
-    await app.bookService.update(two, { tags: ["Science-Fiction"], series: "dune chronicles", publisher: "Ace Books" });
+    await books.update(app, one, { tags: ["science fiction", "Space"], series: "Dune Chronicles", publisher: "ACE" });
+    await books.update(app, two, { tags: ["Science-Fiction"], series: "dune chronicles", publisher: "Ace Books" });
 
-    const tagGroups = await app.cleanup.groups("tags");
+    const tagGroups = await cleanup.groups(app, "tags");
     expect(tagGroups.groups[0]!.variants.map((v) => v.name).sort()).toEqual(["Science-Fiction", "science fiction"]);
     expect(tagGroups.singles).toEqual([]); // lone names are only listed for authors
 
@@ -225,20 +219,20 @@ describe("name cleanup service", () => {
       ["series", ["dune chronicles"], "Dune Chronicles"],
       ["publishers", ["ACE", "Ace Books"], "Ace"],
     ];
-    for (const [field, from, to] of merges) await app.cleanup.merge(field, from, to);
-    expect(app.books.get(one)).toMatchObject({ tags: ["Science Fiction", "Space"], series: "Dune Chronicles", publisher: "Ace" });
-    expect(app.books.get(two)).toMatchObject({ tags: ["Science Fiction"], series: "Dune Chronicles", publisher: "Ace" });
+    for (const [field, from, to] of merges) await cleanup.merge(app, field, from, to);
+    expect(bookRepo.get(app.db, one)).toMatchObject({ tags: ["Science Fiction", "Space"], series: "Dune Chronicles", publisher: "Ace" });
+    expect(bookRepo.get(app.db, two)).toMatchObject({ tags: ["Science Fiction"], series: "Dune Chronicles", publisher: "Ace" });
 
-    await expect(app.cleanup.merge("authors", [], "X")).rejects.toThrow(ValidationError);
-    await expect(app.cleanup.merge("authors", ["A"], "  ")).rejects.toThrow(ValidationError);
-    await expect(app.cleanup.groups("genres")).rejects.toThrow(ValidationError);
+    await expect(cleanup.merge(app, "authors", [], "X")).rejects.toThrow(ValidationError);
+    await expect(cleanup.merge(app, "authors", ["A"], "  ")).rejects.toThrow(ValidationError);
+    await expect(cleanup.groups(app, "genres")).rejects.toThrow(ValidationError);
   });
 
   test("lookup candidates use the remembered spelling, so they match the book", async () => {
     put("S/Dune -- Frank Herbert.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert.epub");
-    await app.cleanup.merge("authors", ["FRANK HERBERT"], "Frank Herbert");
+    await cleanup.merge(app, "authors", ["FRANK HERBERT"], "Frank Herbert");
     const candidate = (authors: string[]): MetadataCandidate => ({
       source: "openlibrary",
       match: "search",
@@ -252,13 +246,13 @@ describe("name cleanup service", () => {
     });
     // A lookup result reached through the review queue's stored payload goes through the same path.
     app.db.query("INSERT INTO review_queue (book_id, payload) VALUES (?, ?)").run(id, JSON.stringify([candidate(["FRANK HERBERT"])]));
-    const [item] = app.lookup.reviewQueue();
+    const [item] = lookups.reviewItems(app);
     expect(item!.result.candidates[0]!.metadata.authors).toEqual(["Frank Herbert"]);
     expect(item!.result.candidates[0]!.diff.find((d) => d.field === "authors")!.status).toBe("same");
   });
 
   test("author search: Wikidata's people, those known to libraries first; Open Library as the fallback", async () => {
-    const found = await app.cleanup.searchAuthors("jane austen");
+    const found = await cleanup.searchAuthors(app, "jane austen");
     expect(found).toEqual({
       source: "wikidata",
       note: null,
@@ -288,20 +282,20 @@ describe("name cleanup service", () => {
     expect(sparql).toContain("wd:Q5");
 
     wikidata = "empty";
-    expect(await app.cleanup.searchAuthors("jane austin")).toMatchObject({
+    expect(await cleanup.searchAuthors(app, "jane austin")).toMatchObject({
       source: "openlibrary",
       note: "No person called “jane austin” on Wikidata.",
       matches: [expect.objectContaining({ key: "OL21594A", source: "openlibrary" }), expect.anything()],
     });
     wikidata = "down";
-    const down = await app.cleanup.searchAuthors("j. austen");
+    const down = await cleanup.searchAuthors(app, "j. austen");
     expect(down.source).toBe("openlibrary");
     expect(down.note).toStartWith("Wikidata could not be reached");
 
     // Open Library by hand, even when Wikidata has matches.
     wikidata = "ok";
-    expect((await app.cleanup.searchAuthors("jane austen", "openlibrary")).source).toBe("openlibrary");
-    await expect(app.cleanup.searchAuthors("jane austen", "google")).rejects.toThrow(ValidationError);
+    expect((await cleanup.searchAuthors(app, "jane austen", "openlibrary")).source).toBe("openlibrary");
+    await expect(cleanup.searchAuthors(app, "jane austen", "google")).rejects.toThrow(ValidationError);
   });
 
   test("swapped titles and authors are found, with a fix read from the filename where possible, and fixed", async () => {
@@ -316,16 +310,16 @@ describe("name cleanup service", () => {
     const road = idOf("S/The Long Road Home - Jane Doe [9780262510875].epub");
     const sea = idOf("S/The Quiet Sea - John Roe [9780131103627].epub");
     // New files are read the right way round…
-    expect(app.books.get(gentle)).toMatchObject({ title: "A gentle introduction to category theory T", authors: ["M. M. Fokkinga"] });
-    expect(app.books.get(pride)).toMatchObject({ title: "Pride and Prejudice", authors: ["Jane Austen"] });
+    expect(bookRepo.get(app.db, gentle)).toMatchObject({ title: "A gentle introduction to category theory T", authors: ["M. M. Fokkinga"] });
+    expect(bookRepo.get(app.db, pride)).toMatchObject({ title: "Pride and Prejudice", authors: ["Jane Austen"] });
     // …but books stored by the old reading are still swapped, and so are names with an ID.
-    const store = (id: number, title: string, authors: string[]) => app.books.updateMetadata(id, { ...app.books.get(id)!, title, authors }, null);
+    const store = (id: number, title: string, authors: string[]) => bookRepo.updateMetadata(app.db, id, { ...bookRepo.get(app.db, id)!, title, authors }, null);
     store(gentle, "Fokkinga M M", ["A gentle introduction to category theory T"]);
     store(pride, "Jane Austen", ["Pride", "Prejudice"]);
-    expect(app.books.get(road)).toMatchObject({ title: "Jane Doe", authors: ["The Long Road Home"] });
-    app.books.confirm(sea, "manual"); // confirmed books are left alone
+    expect(bookRepo.get(app.db, road)).toMatchObject({ title: "Jane Doe", authors: ["The Long Road Home"] });
+    bookRepo.confirm(app.db, sea, "manual"); // confirmed books are left alone
 
-    const suspects = await app.cleanup.swapSuspects();
+    const suspects = await cleanup.swapSuspects(app);
     expect(suspects.map((s) => [s.id, s.basis, s.proposed])).toEqual([
       [gentle, "filename", { title: "A gentle introduction to category theory T", authors: ["M. M. Fokkinga"] }],
       [pride, "filename", { title: "Pride and Prejudice", authors: ["Jane Austen"] }],
@@ -333,14 +327,14 @@ describe("name cleanup service", () => {
     ]);
     expect(suspects[0]!.files).toEqual(["S/A gentle introduction to category theory T - Fokkinga M M.pdf"]);
 
-    await expect(app.cleanup.fixTitleAuthor([])).rejects.toThrow(ValidationError);
-    await expect(app.cleanup.fixTitleAuthor([{ id: road, title: " ", authors: [] }])).rejects.toThrow(ValidationError);
-    const r = await app.cleanup.fixTitleAuthor(suspects.map((s) => ({ id: s.id, ...s.proposed })));
+    await expect(cleanup.fixTitleAuthor(app, [])).rejects.toThrow(ValidationError);
+    await expect(cleanup.fixTitleAuthor(app, [{ id: road, title: " ", authors: [] }])).rejects.toThrow(ValidationError);
+    const r = await cleanup.fixTitleAuthor(app, suspects.map((s) => ({ id: s.id, ...s.proposed })));
     expect(r).toMatchObject({ books: 3, errors: [] });
-    expect(app.books.get(road)).toMatchObject({ title: "The Long Road Home", authors: ["Jane Doe"], confirmedSource: null });
+    expect(bookRepo.get(app.db, road)).toMatchObject({ title: "The Long Road Home", authors: ["Jane Doe"], confirmedSource: null });
     expect(filesOf(road)).toEqual(["S/Jane Doe - The Long Road Home [9780262510875].epub"]);
     expect(filesOf(gentle)).toEqual(["S/M. M. Fokkinga - A gentle introduction to category theory T.pdf"]);
-    expect(await app.cleanup.swapSuspects()).toEqual([]);
+    expect(await cleanup.swapSuspects(app)).toEqual([]);
   });
 
   test("HTTP endpoints, including the author search", async () => {
@@ -374,13 +368,13 @@ describe("name cleanup service", () => {
       expect(await removed.json()).toEqual([]);
 
       const sanditon = idOf("S/Sanditon -- Jane Austen.epub");
-      app.books.updateMetadata(sanditon, { ...app.books.get(sanditon)!, title: "Jane Austen", authors: ["The Watsons and Other Stories"] }, null);
+      bookRepo.updateMetadata(app.db, sanditon, { ...bookRepo.get(app.db, sanditon)!, title: "Jane Austen", authors: ["The Watsons and Other Stories"] }, null);
       const swaps = await (await call("api/cleanup/swaps")).json();
       expect(swaps.map((s: { id: number }) => s.id)).toEqual([sanditon]);
       expect((await call("api/cleanup/swaps", { method: "POST", body: JSON.stringify({ items: "x" }) })).status).toBe(400);
       const fixed = await call("api/cleanup/swaps", { method: "POST", body: JSON.stringify({ items: [{ id: sanditon, ...swaps[0].proposed }] }) });
       expect((await fixed.json()).books).toBe(1);
-      expect(app.books.get(sanditon)).toMatchObject({ title: "The Watsons and Other Stories", authors: ["Jane Austen"] });
+      expect(bookRepo.get(app.db, sanditon)).toMatchObject({ title: "The Watsons and Other Stories", authors: ["Jane Austen"] });
     } finally {
       server.stop(true);
     }

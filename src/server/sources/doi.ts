@@ -35,7 +35,7 @@ interface WorkRecord {
   language?: string;
 }
 
-const first = (v: string | string[] | undefined): string | null => {
+const first = (v: string | readonly string[] | undefined): string | null => {
   const s = Array.isArray(v) ? v[0] : v;
   return s?.replace(/\s+/g, " ").trim() || null;
 };

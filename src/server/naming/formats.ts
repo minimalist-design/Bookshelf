@@ -15,21 +15,19 @@ const EXTENSIONS: readonly [string, BookFormat][] = [
 ];
 
 export interface DetectedFormat {
-  format: BookFormat;
+  readonly format: BookFormat;
   /** Extension exactly as it appears in the filename (original case), including the leading dot. */
-  ext: string;
+  readonly ext: string;
   /** Filename without the extension. */
-  stem: string;
+  readonly stem: string;
 }
 
 /** Identify a supported book file by its name; null when unsupported. */
 export function detectFormat(filename: string): DetectedFormat | null {
   const lower = filename.toLowerCase();
-  for (const [ext, format] of EXTENSIONS) {
-    if (lower.endsWith(ext) && lower.length > ext.length) {
-      const cut = filename.length - ext.length;
-      return { format, ext: filename.slice(cut), stem: filename.slice(0, cut) };
-    }
-  }
-  return null;
+  const match = EXTENSIONS.find(([ext]) => lower.endsWith(ext) && lower.length > ext.length);
+  if (!match) return null;
+  const [ext, format] = match;
+  const cut = filename.length - ext.length;
+  return { format, ext: filename.slice(cut), stem: filename.slice(0, cut) };
 }

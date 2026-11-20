@@ -1,32 +1,28 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ConflictError, NotFoundError } from "../src/server/api/http.ts";
 import { apiRoutes } from "../src/server/api/router.ts";
-import { createApp, type AppContext } from "../src/server/app.ts";
-import { loadConfig } from "../src/server/config.ts";
+import type { AppContext } from "../src/server/app.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import { listLibrary, listShelves } from "../src/server/library/queries.ts";
-import { makeEpub, makePng } from "./fixtures.ts";
+import { closeTestApp, FAST_LIBRARY, makeEpub, makePng, scratchDir, testApp } from "./fixtures.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
+import * as coverStore from "../src/server/covers/store.ts";
+import * as hashCacheRepo from "../src/server/db/repo/hashCache.ts";
+import * as books from "../src/server/services/books.ts";
+import * as shelves from "../src/server/services/shelves.ts";
 
-const FAST = { debounceMs: 30, stableMs: 80, graceMs: 300 };
 let tmp: string;
 let root: string;
 let app: AppContext;
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), "bookshelf-shelves-"));
-  root = join(tmp, "library");
-  mkdirSync(root, { recursive: true });
-  app = createApp(loadConfig({ data_dir: join(tmp, "data") }), { library: FAST });
+  ({ tmp, root } = scratchDir("shelves"));
+  app = testApp(tmp);
 });
 
-afterEach(async () => {
-  await app.library.close();
-  app.db.close();
-  rmSync(tmp, { recursive: true, force: true });
-});
+afterEach(() => closeTestApp(app, tmp));
 
 function put(rel: string, content: string | Uint8Array = rel) {
   const abs = join(root, rel);
@@ -38,17 +34,17 @@ const paths = () => [...app.library.index.allFiles()].map((f) => f.relPath).sort
 const shelfNames = () => listShelves(root, app.library.index).map((s) => s.name);
 /** Let watcher events and grace timers run, then check nothing was re-processed or lost. */
 async function settle() {
-  await Bun.sleep(FAST.graceMs + 400);
+  await Bun.sleep(FAST_LIBRARY.graceMs + 400);
 }
 
 describe("shelves", () => {
   test("create: validation and duplicates", async () => {
     await app.library.open(root);
-    expect(await app.shelfService.create("  Science Fiction ")).toBe("Science Fiction");
+    expect(await shelves.create(app, "  Science Fiction ")).toBe("Science Fiction");
     expect(statSync(join(root, "Science Fiction")).isDirectory()).toBe(true);
-    await expect(app.shelfService.create("Science Fiction")).rejects.toThrow(ConflictError);
-    await expect(app.shelfService.create("../x")).rejects.toThrow(ValidationError);
-    await expect(app.shelfService.create(".hidden")).rejects.toThrow(ValidationError);
+    await expect(shelves.create(app, "Science Fiction")).rejects.toThrow(ConflictError);
+    await expect(shelves.create(app, "../x")).rejects.toThrow(ValidationError);
+    await expect(shelves.create(app, ".hidden")).rejects.toThrow(ValidationError);
     expect(shelfNames()).toEqual([null, "Science Fiction"]);
   });
 
@@ -60,20 +56,20 @@ describe("shelves", () => {
     const one = idOf("Old/One -- A.epub");
     const two = idOf("Old/Sub/Two -- B.epub");
 
-    await expect(app.shelfService.rename("Old", "Other")).rejects.toThrow(ConflictError);
-    await expect(app.shelfService.rename("Missing", "X")).rejects.toThrow(NotFoundError);
-    expect(await app.shelfService.rename("Old", "New Name")).toBe("New Name");
+    await expect(shelves.rename(app, "Old", "Other")).rejects.toThrow(ConflictError);
+    await expect(shelves.rename(app, "Missing", "X")).rejects.toThrow(NotFoundError);
+    expect(await shelves.rename(app, "Old", "New Name")).toBe("New Name");
     expect(paths()).toEqual(["New Name/One -- A.epub", "New Name/Sub/Two -- B.epub", "Other/Three -- C.epub"]);
     expect(idOf("New Name/One -- A.epub")).toBe(one);
     expect(idOf("New Name/Sub/Two -- B.epub")).toBe(two);
     const st = statSync(join(root, "New Name/One -- A.epub"));
-    expect(app.hashCache.get(join(root, "New Name/One -- A.epub"), st.size, st.mtimeMs)).toBe(app.library.index.get("New Name/One -- A.epub")!.hash);
+    expect(hashCacheRepo.get(app.db, join(root, "New Name/One -- A.epub"), st.size, st.mtimeMs)).toBe(app.library.index.get("New Name/One -- A.epub")!.hash);
 
     await settle();
     expect(paths()).toHaveLength(3);
-    expect(app.books.count()).toBe(3);
+    expect(bookRepo.count(app.db)).toBe(3);
 
-    expect(await app.shelfService.rename("New Name", "new name")).toBe("new name"); // case-only rename
+    expect(await shelves.rename(app, "New Name", "new name")).toBe("new name"); // case-only rename
     expect(shelfNames()).toEqual([null, "new name", "Other"]);
   });
 
@@ -87,14 +83,14 @@ describe("shelves", () => {
     await app.library.open(root);
     const nested = idOf("Doomed/deep/er/Nested -- Book.epub");
 
-    const r = await app.shelfService.remove("Doomed");
+    const r = await shelves.remove(app, "Doomed");
     expect(r.moved.map((m) => m.to).sort()).toEqual(["Nested -- Book.epub", "Same -- Name (2).epub"]);
     expect(existsSync(join(root, "Doomed"))).toBe(false);
     expect(paths()).toEqual(["Nested -- Book.epub", "Same -- Name (2).epub", "Same -- Name.epub"]);
     expect(idOf("Nested -- Book.epub")).toBe(nested);
     expect(app.library.index.get("Nested -- Book.epub")!.shelf).toBeNull();
     await settle();
-    expect(app.books.count()).toBe(3);
+    expect(bookRepo.count(app.db)).toBe(3);
   });
 
   test("delete refuses (and touches nothing) when non-book files are present", async () => {
@@ -103,7 +99,7 @@ describe("shelves", () => {
     put("Shelf/.stfolder", "sync marker");
     await app.library.open(root);
     try {
-      await app.shelfService.remove("Shelf");
+      await shelves.remove(app, "Shelf");
       throw new Error("expected a conflict");
     } catch (err) {
       expect(err).toBeInstanceOf(ConflictError);
@@ -127,7 +123,7 @@ describe("moving books", () => {
     const twin = idOf("A/Twin -- Author.epub");
     const stay = idOf("B/Sub/Stay -- Here.epub");
 
-    const r = await app.bookService.move([dune, twin, stay], "B");
+    const r = await books.move(app, [dune, twin, stay], "B");
     expect(r.errors).toEqual([]);
     expect(r.moved.map((m) => m.to).sort()).toEqual([
       "B/Dune -- Frank Herbert -- isbn13 9780441172719.epub",
@@ -137,13 +133,13 @@ describe("moving books", () => {
     expect(app.library.index.filesOfBook(stay)[0]!.relPath).toBe("B/Sub/Stay -- Here.epub"); // already on B
     expect(readdirSync(join(root, "A"))).toEqual([]);
 
-    await app.bookService.move([dune], null);
+    await books.move(app, [dune], null);
     expect(app.library.index.filesOfBook(dune).map((f) => f.shelf)).toEqual([null, null]);
-    await expect(app.bookService.move([dune], "Nope")).rejects.toThrow(NotFoundError);
-    await expect(app.bookService.move([dune], "../etc")).rejects.toThrow(ValidationError);
+    await expect(books.move(app, [dune], "Nope")).rejects.toThrow(NotFoundError);
+    await expect(books.move(app, [dune], "../etc")).rejects.toThrow(ValidationError);
 
     await settle();
-    expect(app.books.count()).toBe(4);
+    expect(bookRepo.count(app.db)).toBe(4);
     expect(app.library.index.size).toBe(5);
   });
 });
@@ -156,18 +152,18 @@ describe("deleting", () => {
     const plain = idOf("S/a.epub");
     const kept = idOf("S/Kept -- Author.epub");
     await Bun.sleep(50);
-    expect(app.covers.exists(plain)).toBe(true);
-    await app.bookService.update(kept, { rating: 3 }); // confirms
+    expect(coverStore.exists(app.config.coversDir, plain)).toBe(true);
+    await books.update(app, kept, { rating: 3 }); // confirms
 
-    const r = await app.bookService.deleteBooks([plain, kept]);
-    expect(r.deletedFiles.sort()).toEqual(["S/Kept -- Author.epub", "S/a.epub"]);
+    const r = await books.remove(app, [plain, kept]);
+    expect(r.deletedFiles.toSorted()).toEqual(["S/Kept -- Author.epub", "S/a.epub"]);
     expect(r.removedMetadata).toEqual([plain]);
     expect(r.keptMetadata).toEqual([kept]);
-    expect(app.books.exists(plain)).toBe(false);
-    expect(app.covers.exists(plain)).toBe(false);
-    expect(app.books.exists(kept)).toBe(true);
+    expect(bookRepo.exists(app.db, plain)).toBe(false);
+    expect(coverStore.exists(app.config.coversDir, plain)).toBe(false);
+    expect(bookRepo.exists(app.db, kept)).toBe(true);
     expect(readdirSync(join(root, "S"))).toEqual([]);
-    expect(listLibrary(app.library.index, app.books, {}).total).toBe(0);
+    expect(listLibrary(app.library.index, app.db, {}).total).toBe(0);
   });
 
   test("deleting one file of a multi-format book keeps the book", async () => {
@@ -176,10 +172,10 @@ describe("deleting", () => {
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     const pdf = app.library.index.get("S/Dune -- Frank Herbert -- isbn13 9780441172719.pdf")!;
-    const r = await app.bookService.deleteFile(id, pdf.hash);
+    const r = await books.removeFile(app, id, pdf.hash);
     expect(r).toMatchObject({ deletedFiles: [pdf.relPath], keptMetadata: [], removedMetadata: [] });
     expect(app.library.index.filesOfBook(id).map((f) => f.format)).toEqual(["epub"]);
-    await expect(app.bookService.deleteFile(id, "nope")).rejects.toThrow(NotFoundError);
+    await expect(books.removeFile(app, id, "nope")).rejects.toThrow(NotFoundError);
   });
 });
 

@@ -5,7 +5,7 @@ import { cover, isImageName, mimeFromName, naturalSort } from "./images.ts";
 import { run, runText } from "./subprocess.ts";
 import { htmlToText, normalizeDate, splitList } from "./text.ts";
 import { arr, attr, decodeXml, parseXml, textOf } from "./xml.ts";
-import { isZipFile, ZipArchive } from "./zip.ts";
+import { findEntry, isZipFile, openZip, readEntry } from "./zip.ts";
 
 /** Uniform read access to the entries of a comic archive. */
 export interface ComicArchive {
@@ -21,61 +21,64 @@ export function comicPages(archive: ComicArchive): string[] {
 /** ComicInfo.xml (Anansi schema) → metadata; first page (or FrontCover page) → cover. */
 export async function extractComic(archive: ComicArchive): Promise<RawMetadata> {
   const pages = comicPages(archive);
-  const out: RawMetadata = {};
-  const infoName = naturalSort(archive.names.filter((n) => /(^|\/)comicinfo\.xml$/i.test(n))).sort(
+  const infoName = naturalSort(archive.names.filter((n) => /(^|\/)comicinfo\.xml$/i.test(n))).toSorted(
     (a, b) => a.split("/").length - b.split("/").length,
   )[0];
-  let frontCoverIndex: number | null = null;
+  const bytes = infoName ? await archive.read(infoName) : null;
+  const ci = bytes ? parseXml(decodeXml(bytes))?.ComicInfo : null;
+  const info = ci ? comicInfo(ci, pages.length) : { meta: {}, frontCoverIndex: null };
+  const coverName = pages[info.frontCoverIndex ?? 0];
+  return {
+    ...info.meta,
+    pages: info.meta.pages || pages.length || undefined,
+    ...(coverName
+      ? {
+          loadCover: async () => {
+            const data = await archive.read(coverName);
+            return data ? cover(data, mimeFromName(coverName)) : null;
+          },
+        }
+      : {}),
+  };
+}
 
-  if (infoName) {
-    const bytes = await archive.read(infoName);
-    const ci = bytes ? parseXml(decodeXml(bytes))?.ComicInfo : null;
-    if (ci) {
-      const t = (k: string) => textOf(ci[k]).trim() || undefined;
-      const series = t("Series");
-      const number = t("Number");
-      out.title = t("Title") ?? (series ? (number ? `${series} #${number}` : series) : undefined);
-      out.series = series;
-      const idx = Number(number);
-      if (series && number && Number.isFinite(idx)) out.seriesIndex = idx;
-      out.authors = splitList(t("Writer"));
-      out.publisher = t("Publisher");
-      out.description = htmlToText(t("Summary")) ?? undefined;
-      out.language = t("LanguageISO")?.toLowerCase();
-      const year = t("Year");
-      if (year) {
-        const mm = t("Month")?.padStart(2, "0");
-        const dd = t("Day")?.padStart(2, "0");
-        out.publishedDate = normalizeDate([year, mm, mm && dd].filter(Boolean).join("-")) ?? undefined;
-      }
-      const pageCount = Number(t("PageCount"));
-      if (pageCount > 0) out.pages = pageCount;
-      out.tags = [...splitList(t("Genre")), ...splitList(t("Tags"))];
-      out.isbn13 = normalizeIsbn(t("GTIN")) ?? undefined;
-      const front = arr(ci.Pages?.Page).find((p) => attr(p, "Type") === "FrontCover");
-      const image = Number(attr(front, "Image"));
-      if (Number.isInteger(image) && image >= 0 && image < pages.length) frontCoverIndex = image;
-    }
-  }
-  if (!out.pages && pages.length) out.pages = pages.length;
-
-  const coverName = pages[frontCoverIndex ?? 0];
-  if (coverName) {
-    out.loadCover = async () => {
-      const data = await archive.read(coverName);
-      return data ? cover(data, mimeFromName(coverName)) : null;
-    };
-  }
-  return out;
+/** Metadata from a parsed `<ComicInfo>`, and the index of the page it marks as the front cover. */
+export function comicInfo(ci: any, pageCount: number): { meta: RawMetadata; frontCoverIndex: number | null } {
+  const t = (k: string) => textOf(ci[k]).trim() || undefined;
+  const series = t("Series");
+  const number = t("Number");
+  const idx = Number(number);
+  const year = t("Year");
+  const mm = t("Month")?.padStart(2, "0");
+  const dd = t("Day")?.padStart(2, "0");
+  const pageCountField = Number(t("PageCount"));
+  const front = arr(ci.Pages?.Page).find((p) => attr(p, "Type") === "FrontCover");
+  const image = Number(attr(front, "Image"));
+  return {
+    meta: {
+      title: t("Title") ?? (series ? (number ? `${series} #${number}` : series) : undefined),
+      series,
+      seriesIndex: series && number && Number.isFinite(idx) ? idx : undefined,
+      authors: splitList(t("Writer")),
+      publisher: t("Publisher"),
+      description: htmlToText(t("Summary")) ?? undefined,
+      language: t("LanguageISO")?.toLowerCase(),
+      publishedDate: year ? (normalizeDate([year, mm, mm && dd].filter(Boolean).join("-")) ?? undefined) : undefined,
+      pages: pageCountField > 0 ? pageCountField : undefined,
+      tags: [...splitList(t("Genre")), ...splitList(t("Tags"))],
+      isbn13: normalizeIsbn(t("GTIN")) ?? undefined,
+    },
+    frontCoverIndex: Number.isInteger(image) && image >= 0 && image < pageCount ? image : null,
+  };
 }
 
 export async function zipComicArchive(path: string): Promise<ComicArchive> {
-  const zip = await ZipArchive.open(path);
+  const zip = await openZip(path);
   return {
     names: zip.entries.filter((e) => !e.name.endsWith("/")).map((e) => e.name),
     read: async (name) => {
-      const e = zip.find(name);
-      return e ? zip.read(e, 64 * 1024 * 1024) : null;
+      const e = findEntry(zip, name);
+      return e ? readEntry(zip, e, 64 * 1024 * 1024) : null;
     },
   };
 }
@@ -85,15 +88,9 @@ export async function externalComicArchive(path: string, tools: ExternalTools): 
   if (tools.sevenZip) {
     const listing = await runText([tools.sevenZip, "l", "-slt", "-ba", "-sccUTF-8", "--", path]);
     if (listing !== null) {
-      const names: string[] = [];
-      for (const block of listing.split(/\r?\n\r?\n/)) {
-        const p = /^Path = (.*)$/m.exec(block)?.[1];
-        const isDir = /^Folder = \+$/m.test(block) || /^Attributes = D/m.test(block);
-        if (p && !isDir) names.push(p.replace(/\\/g, "/"));
-      }
       const exe = tools.sevenZip;
       return {
-        names,
+        names: parseSevenZipListing(listing),
         read: async (name) => {
           // -spd: treat the name literally (no wildcard matching).
           const r = await run([exe, "e", "-so", "-spd", "--", path, name], 60_000);
@@ -116,6 +113,15 @@ export async function externalComicArchive(path: string, tools: ExternalTools): 
     }
   }
   return null;
+}
+
+/** File paths from `7z l -slt` output (blocks of `Key = value` lines), folders left out. */
+export function parseSevenZipListing(listing: string): string[] {
+  return listing.split(/\r?\n\r?\n/).flatMap((block) => {
+    const p = /^Path = (.*)$/m.exec(block)?.[1];
+    const isDir = /^Folder = \+$/m.test(block) || /^Attributes = D/m.test(block);
+    return p && !isDir ? [p.replace(/\\/g, "/")] : [];
+  });
 }
 
 export async function extractCbz(path: string): Promise<RawMetadata> {

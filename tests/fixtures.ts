@@ -1,6 +1,52 @@
-// Programmatic generators for tiny but valid book files used by tests.
+// Test setup (scratch directories, apps on them) and generators for tiny but valid book files.
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { strToU8, zipSync, type Zippable } from "fflate";
+import { createApp, type AppContext, type CreateAppOptions } from "../src/server/app.ts";
+import { loadConfig } from "../src/server/config.ts";
+import type { ConfigFileSettings } from "../src/server/configFile.ts";
 import { rgbToBmp } from "../src/server/covers/raster.ts";
+
+// ---- apps ---------------------------------------------------------------------------
+
+/** Library timings short enough for tests: the watcher reacts in about a tenth of a second. */
+export const FAST_LIBRARY = { debounceMs: 30, stableMs: 80, graceMs: 300 } as const;
+/** The same, but metadata of vanished files is kept while a test looks at it. */
+export const SLOW_RETENTION = { ...FAST_LIBRARY, graceMs: 60_000 } as const;
+
+/** A scratch directory holding `library/` (with the given shelves) and, once an app runs on it, `data/`. */
+export function scratchDir(name: string, shelves: readonly string[] = []): { tmp: string; root: string } {
+  const tmp = mkdtempSync(join(tmpdir(), `bookshelf-${name}-`));
+  const root = join(tmp, "library");
+  for (const dir of [root, ...shelves.map((s) => join(root, s))]) mkdirSync(dir, { recursive: true });
+  return { tmp, root };
+}
+
+/** An app with its data in `<tmp>/data`, fast library timings unless `options.library` says otherwise. */
+export function testApp(
+  tmp: string,
+  settings: ConfigFileSettings = {},
+  options: CreateAppOptions = {},
+  env?: Record<string, string | undefined>,
+): AppContext {
+  return createApp(loadConfig({ data_dir: join(tmp, "data"), ...settings }, env), { ...options, library: { ...FAST_LIBRARY, ...options.library } });
+}
+
+/** Stop the app's background work and close it, then remove the scratch directory. */
+export async function closeTestApp(app: AppContext | undefined, tmp?: string): Promise<void> {
+  if (app) {
+    app.lookup.stop();
+    await app.lookup.idle();
+    app.isbndbCovers.stop();
+    await app.isbndbCovers.idle();
+    await app.library.close();
+    app.db.close();
+  }
+  if (tmp) rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---- book files -----------------------------------------------------------------------
 
 type Rgb = { r: number; g: number; b: number };
 
@@ -23,13 +69,11 @@ export async function makeJpeg(width = 60, height = 90, color: Rgb = { r: 40, g:
 
 /** PDF text string: UTF-16BE hex with BOM, safe for any characters. */
 function pdfString(s: string): string {
-  let hex = "FEFF";
-  for (const ch of s) {
+  const units = [...s].flatMap((ch) => {
     const cp = ch.codePointAt(0)!;
-    const units = cp > 0xffff ? [0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff)] : [cp];
-    for (const u of units) hex += u.toString(16).padStart(4, "0").toUpperCase();
-  }
-  return `<${hex}>`;
+    return cp > 0xffff ? [0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff)] : [cp];
+  });
+  return `<FEFF${units.map((u) => u.toString(16).padStart(4, "0").toUpperCase()).join("")}>`;
 }
 
 export interface PdfOptions {
@@ -120,17 +164,19 @@ export function makeEpub({ metadataXml, manifestXml = "", version = "3.0", opfPa
 </container>`),
     [opfPath]: strToU8(opf),
     [`${opfDir}text.xhtml`]: strToU8("<html xmlns='http://www.w3.org/1999/xhtml'><body><p>Hi</p></body></html>"),
+    ...zippable(files, opfDir),
   };
-  for (const [p, data] of Object.entries(files)) zip[opfDir + p] = typeof data === "string" ? strToU8(data) : data;
   return zipSync(zip);
 }
 
 // ---- CBZ ----------------------------------------------------------------------
 
+/** Archive entries as bytes, their paths under `prefix`. */
+const zippable = (entries: Record<string, Uint8Array | string>, prefix = ""): Zippable =>
+  Object.fromEntries(Object.entries(entries).map(([p, data]) => [prefix + p, typeof data === "string" ? strToU8(data) : data]));
+
 export function makeZip(entries: Record<string, Uint8Array | string>): Uint8Array {
-  const zip: Zippable = {};
-  for (const [p, data] of Object.entries(entries)) zip[p] = typeof data === "string" ? strToU8(data) : data;
-  return zipSync(zip);
+  return zipSync(zippable(entries));
 }
 
 // ---- FB2 ----------------------------------------------------------------------

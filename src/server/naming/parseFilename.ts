@@ -7,15 +7,15 @@ import { orientationMargin, orientationOf, personNameScore, type KnownAuthor } f
 export type NamePattern = "import" | "library" | "plain";
 
 export interface ParsedFilename {
-  pattern: NamePattern;
-  title: string | null;
-  authors: string[];
-  isbn13: string | null;
+  readonly pattern: NamePattern;
+  readonly title: string | null;
+  readonly authors: readonly string[];
+  readonly isbn13: string | null;
   /** False when an ISBN-13 was found but its checksum is wrong (it is still kept). */
-  isbn13Valid: boolean;
-  doi: string | null;
+  readonly isbn13Valid: boolean;
+  readonly doi: string | null;
   /** The raw DOI token as written in the filename (useful to retry ambiguous `_` reversals). */
-  doiToken: string | null;
+  readonly doiToken: string | null;
 }
 
 const IMPORT_SEP = " -- ";
@@ -44,42 +44,56 @@ export function parseFilename(filename: string, opts: ParseOptions = {}): Parsed
   return stem.includes(IMPORT_SEP) ? parseImportPattern(stem, opts) : parseLibraryOrPlain(stem, opts);
 }
 
+interface ImportScan {
+  isbn13: string | null;
+  doi: string | null;
+  doiToken: string | null;
+  positional: string[];
+}
+
+/**
+ * Take the ISBN and DOI tokens out of one ` -- ` segment. Only the first ID of each kind is used:
+ * once one is found, later tokens stay in their segments.
+ */
+function scanSegment(acc: ImportScan, raw: string): ImportScan {
+  const isbnMatch = acc.isbn13 ? null : ISBN_TOKEN.exec(raw);
+  const afterIsbn = isbnMatch ? raw.replace(isbnMatch[0], " ") : raw;
+  const doiMatch = acc.doi ? null : DOI_TOKEN.exec(afterIsbn);
+  const segment = doiMatch ? afterIsbn.replace(doiMatch[0], " ") : afterIsbn;
+  const token = doiMatch ? doiMatch[1]!.replace(/[.,;)]+$/, "") : null;
+  const doi = token !== null ? doiFromFilename(token) : acc.doi;
+  return {
+    isbn13: isbnMatch ? normalizeIsbn(isbnMatch[1]!) : acc.isbn13,
+    doi,
+    doiToken: token !== null ? (doi ? token : null) : acc.doiToken,
+    // Segments that only held ID tokens don't take a positional slot.
+    positional: tidy(segment) !== null || segment === raw ? [...acc.positional, segment] : acc.positional,
+  };
+}
+
 /**
  * `{title} -- {author}[ -- …]` with `isbn13 …` / `doi …` tokens anywhere. The first two segments
  * are swapped only when the first is clearly a name and the second clearly a title.
  */
 function parseImportPattern(stem: string, opts: ParseOptions): ParsedFilename {
-  const out = emptyResult("import");
-  const positional: string[] = [];
-
-  for (const rawSegment of stem.split(IMPORT_SEP)) {
-    let segment = rawSegment;
-    const isbnMatch = ISBN_TOKEN.exec(segment);
-    if (isbnMatch && !out.isbn13) {
-      out.isbn13 = normalizeIsbn(isbnMatch[1]!);
-      segment = segment.replace(isbnMatch[0], " ");
-    }
-    const doiMatch = DOI_TOKEN.exec(segment);
-    if (doiMatch && !out.doi) {
-      const token = doiMatch[1]!.replace(/[.,;)]+$/, "");
-      out.doi = doiFromFilename(token);
-      out.doiToken = out.doi ? token : null;
-      segment = segment.replace(doiMatch[0], " ");
-    }
-    // Segments that only held ID tokens don't take a positional slot.
-    if (tidy(segment) !== null || segment === rawSegment) positional.push(segment);
-  }
-
+  const { positional, isbn13, doi, doiToken } = stem
+    .split(IMPORT_SEP)
+    .reduce<ImportScan>(scanSegment, { isbn13: null, doi: null, doiToken: null, positional: [] });
   const [first, second] = [tidy(positional[0]), tidy(positional[1])];
   const swapped =
     first !== null &&
     second !== null &&
     personNameScore(second, opts.isKnownAuthor) <= -2 &&
     orientationOf(personNameScore(first, opts.isKnownAuthor), personNameScore(second, opts.isKnownAuthor)) === "first-is-author";
-  out.title = swapped ? second : first;
-  out.authors = splitAuthors(swapped ? first : second);
-  if (out.isbn13) out.isbn13Valid = isValidIsbn13(out.isbn13);
-  return out;
+  return {
+    pattern: "import",
+    title: swapped ? second : first,
+    authors: splitAuthors(swapped ? first : second),
+    isbn13,
+    isbn13Valid: isbn13 ? isValidIsbn13(isbn13) : true,
+    doi,
+    doiToken,
+  };
 }
 
 const LIBRARY = /^(.+?) - (.+?)(?: \[([^\]]+)\])?(?: \((\d+)\))?$/;
@@ -96,41 +110,35 @@ const UNKNOWN = "Unknown";
  */
 function parseLibraryOrPlain(stem: string, opts: ParseOptions): ParsedFilename {
   const m = LIBRARY.exec(stem.trim());
-  if (!m) {
-    const out = emptyResult("plain");
-    out.title = tidy(stem);
-    return out;
-  }
+  if (!m) return { ...emptyResult("plain"), title: tidy(stem) };
   const [, authorPart, titlePart, bracket, counter] = m;
-  const out = emptyResult("library");
-  let title = titlePart!;
-  let isId = false;
+  const ids = bracket === undefined ? null : readBracket(bracket);
+  // A bracket that isn't an ID belongs to the title; a collision counter is only meaningful
+  // after an ID bracket, so without any bracket it is part of the title too.
+  const suffix = bracket === undefined ? (counter !== undefined ? ` (${counter})` : "") : ids ? "" : ` [${bracket}]`;
+  const title = `${titlePart}${suffix}`;
 
-  if (bracket !== undefined) {
-    const compact = bracket.replace(/[\s-]/g, "");
-    if (/^97[89]\d{10}$/.test(compact)) {
-      out.isbn13 = compact;
-      out.isbn13Valid = isValidIsbn13(compact);
-      isId = true;
-    } else if (/^10\.\d{4,9}[_\/]/.test(bracket)) {
-      out.doi = doiFromFilename(bracket);
-      out.doiToken = out.doi ? bracket : null;
-      isId = true;
-    } else {
-      title += ` [${bracket}]`; // not an ID: belongs to the title
-    }
-  }
-  // A collision counter is only meaningful after an ID bracket; otherwise it is part of the title.
-  if (counter !== undefined && bracket === undefined) title += ` (${counter})`;
-
-  const { author, title: finalTitle } = isId
+  const named = ids
     ? { author: authorPart!, title }
     : orientName(`${authorPart}${LIBRARY_SEP}${title}`, opts) ?? { author: authorPart!, title };
+  const authors = splitAuthors(named.author);
+  return {
+    ...emptyResult("library"),
+    ...ids,
+    title: tidy(named.title),
+    authors: authors.length === 1 && authors[0] === UNKNOWN ? [] : authors,
+  };
+}
 
-  out.title = tidy(finalTitle);
-  const authors = splitAuthors(author);
-  out.authors = authors.length === 1 && authors[0] === UNKNOWN ? [] : authors;
-  return out;
+type BracketIds = Pick<ParsedFilename, "isbn13" | "isbn13Valid" | "doi" | "doiToken">;
+
+/** The ISBN or DOI in an app-written `[…]` bracket, or null when the bracket is not an ID. */
+function readBracket(bracket: string): BracketIds | null {
+  const compact = bracket.replace(/[\s-]/g, "");
+  if (/^97[89]\d{10}$/.test(compact)) return { isbn13: compact, isbn13Valid: isValidIsbn13(compact), doi: null, doiToken: null };
+  if (!/^10\.\d{4,9}[_\/]/.test(bracket)) return null;
+  const doi = doiFromFilename(bracket);
+  return { isbn13: null, isbn13Valid: true, doi, doiToken: doi ? bracket : null };
 }
 
 /**

@@ -1,16 +1,17 @@
 import { foldKey } from "../cleanup/similarity.ts";
+import { uniqueCaseless } from "../collections.ts";
 import { splitAuthors } from "../naming/authors.ts";
 import { NAME_SCORE, orientation, personNameScore, type KnownAuthor } from "../naming/nameShape.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import type { BookFormat } from "../naming/formats.ts";
 import type { ParsedFilename } from "../naming/parseFilename.ts";
-import { emptyMetadata, type BookMetadata, type MetadataSource, type RawMetadata } from "../metadata/types.ts";
+import type { BookMetadata, MetadataSource, RawMetadata } from "../metadata/types.ts";
 import { isJunkAuthor, isJunkTitle } from "./junk.ts";
 
 export interface MergeResult {
-  metadata: BookMetadata;
-  source: MetadataSource;
+  readonly metadata: BookMetadata;
+  readonly source: MetadataSource;
 }
 
 function text(v: string | null | undefined): string | null {
@@ -55,63 +56,64 @@ function embeddedNames(
   };
 }
 
+type Origin = "embedded" | "filename" | null;
+
+/**
+ * An embedded title that merely repeats a *structured* filename ("T -- A -- isbn13 …") is junk;
+ * a plain filename equal to the title ("dune.epub" / "Dune") is just a well-named file.
+ */
+function chooseTitle(embTitle: string | null, parsed: ParsedFilename, fileStem: string): { value: string; from: Origin } {
+  if (embTitle && !isJunkTitle(embTitle, parsed.pattern === "plain" ? undefined : fileStem)) return { value: embTitle, from: "embedded" };
+  if (parsed.title) return { value: parsed.title, from: "filename" };
+  return { value: text(fileStem) ?? "Untitled", from: "filename" };
+}
+
+function chooseAuthors(embAuthors: readonly string[], parsed: ParsedFilename): { value: readonly string[]; from: Origin } {
+  if (embAuthors.length) return { value: embAuthors, from: "embedded" };
+  if (parsed.authors.length) return { value: parsed.authors, from: "filename" };
+  return { value: [], from: null };
+}
+
 /**
  * Field-level merge: each embedded value wins unless it is junk; empty fields are
  * filled from the filename. isbn13/doi found in the filename always win.
  */
 export function mergeMetadata(embedded: RawMetadata, parsed: ParsedFilename, fileStem: string, opts: MergeOptions = {}): MergeResult {
-  let usedEmbedded = false;
-  let usedFilename = false;
-
   const names = embeddedNames(embedded, parsed, fileStem, opts.isKnownAuthor);
-  const embTitle = names.title;
-  let title: string;
-  // An embedded title that merely repeats a *structured* filename ("T -- A -- isbn13 …") is junk;
-  // a plain filename equal to the title ("dune.epub" / "Dune") is just a well-named file.
-  if (embTitle && !isJunkTitle(embTitle, parsed.pattern === "plain" ? undefined : fileStem)) {
-    title = embTitle;
-    usedEmbedded = true;
-  } else if (parsed.title) {
-    title = parsed.title;
-    usedFilename = true;
-  } else {
-    title = text(fileStem) ?? "Untitled";
-    usedFilename = true;
-  }
+  const title = chooseTitle(names.title, parsed, fileStem);
+  const authors = chooseAuthors(
+    names.authors.flatMap((a) => splitAuthors(a)).filter((a) => !isJunkAuthor(a)),
+    parsed,
+  );
+  const publishedDate = text(embedded.publishedDate);
+  const series = text(embedded.series);
+  const metadata: BookMetadata = {
+    title: title.value,
+    subtitle: text(embedded.subtitle),
+    authors: authors.value,
+    isbn13: parsed.isbn13 ?? normalizeIsbn(embedded.isbn13),
+    doi: parsed.doi ?? normalizeDoi(embedded.doi),
+    publisher: text(embedded.publisher),
+    edition: null,
+    publishedDate,
+    year: embedded.year ?? yearFrom(publishedDate),
+    language: text(embedded.language),
+    pages: embedded.pages && embedded.pages > 0 ? Math.round(embedded.pages) : null,
+    description: text(embedded.description),
+    series,
+    seriesIndex: series && embedded.seriesIndex != null && Number.isFinite(embedded.seriesIndex) ? embedded.seriesIndex : null,
+    tags: uniqueCaseless((embedded.tags ?? []).map((t) => text(t)).filter((t): t is string => !!t && t.length <= 64)),
+  };
 
-  const embAuthors = names.authors
-    .flatMap((a) => splitAuthors(a))
-    .filter((a) => !isJunkAuthor(a));
-  let authors: string[] = [];
-  if (embAuthors.length) {
-    authors = embAuthors;
-    usedEmbedded = true;
-  } else if (parsed.authors.length) {
-    authors = parsed.authors;
-    usedFilename = true;
-  }
-
-  const m = emptyMetadata(title);
-  m.authors = authors;
-  m.isbn13 = parsed.isbn13 ?? normalizeIsbn(embedded.isbn13);
-  m.doi = parsed.doi ?? normalizeDoi(embedded.doi);
-  if (parsed.isbn13 || parsed.doi) usedFilename = true;
-  if ((!parsed.isbn13 && m.isbn13) || (!parsed.doi && m.doi)) usedEmbedded = true;
-
-  m.subtitle = text(embedded.subtitle);
-  m.publisher = text(embedded.publisher);
-  m.publishedDate = text(embedded.publishedDate);
-  m.year = embedded.year ?? yearFrom(m.publishedDate);
-  m.language = text(embedded.language);
-  m.pages = embedded.pages && embedded.pages > 0 ? Math.round(embedded.pages) : null;
-  m.description = text(embedded.description);
-  m.series = text(embedded.series);
-  m.seriesIndex = m.series && embedded.seriesIndex != null && Number.isFinite(embedded.seriesIndex) ? embedded.seriesIndex : null;
-  m.tags = dedupe((embedded.tags ?? []).map((t) => text(t)).filter((t): t is string => !!t && t.length <= 64));
-  if (m.subtitle || m.publisher || m.description || m.series || m.tags.length) usedEmbedded = true;
-
+  const origins = [title.from, authors.from];
+  const usedFilename = origins.includes("filename") || !!(parsed.isbn13 || parsed.doi);
+  const usedEmbedded =
+    origins.includes("embedded") ||
+    (!parsed.isbn13 && !!metadata.isbn13) ||
+    (!parsed.doi && !!metadata.doi) ||
+    !!(metadata.subtitle || metadata.publisher || metadata.description || metadata.series || metadata.tags.length);
   const source: MetadataSource = usedEmbedded && usedFilename ? "mixed" : usedEmbedded ? "embedded" : "filename";
-  return { metadata: m, source };
+  return { metadata, source };
 }
 
 export function yearFrom(date: string | null | undefined): number | null {
@@ -119,27 +121,13 @@ export function yearFrom(date: string | null | undefined): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function dedupe(values: string[]): string[] {
-  const seen = new Set<string>();
-  return values.filter((v) => {
-    const k = v.toLowerCase();
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-}
-
 /** Field-by-field: `primary` wins wherever it has a value, `secondary` fills the gaps. */
 export function fillMetadata(primary: BookMetadata, secondary: BookMetadata): BookMetadata {
-  const pick = <K extends keyof BookMetadata>(k: K): BookMetadata[K] => {
-    const a = primary[k];
-    const empty = a === null || a === undefined || a === "" || (Array.isArray(a) && a.length === 0);
-    return empty ? secondary[k] : a;
-  };
-  const out = { ...primary };
-  for (const k of Object.keys(primary) as (keyof BookMetadata)[]) (out as Record<string, unknown>)[k] = pick(k);
-  if (!primary.series) out.seriesIndex = secondary.seriesIndex;
-  return out;
+  const isEmpty = (v: unknown) => v === null || v === undefined || v === "" || (Array.isArray(v) && v.length === 0);
+  const filled = Object.fromEntries(
+    Object.entries(primary).map(([k, v]) => [k, isEmpty(v) ? secondary[k as keyof BookMetadata] : v]),
+  ) as BookMetadata;
+  return { ...filled, seriesIndex: primary.series ? filled.seriesIndex : secondary.seriesIndex };
 }
 
 /** How trustworthy each format's embedded metadata usually is (lower is better). */

@@ -21,6 +21,6 @@ export function cover(data: Uint8Array, mime: string): CoverImage | null {
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 /** Natural sort of archive paths ("page2" before "page10"). */
-export function naturalSort(names: string[]): string[] {
-  return [...names].sort(collator.compare);
+export function naturalSort(names: readonly string[]): string[] {
+  return names.toSorted(collator.compare);
 }

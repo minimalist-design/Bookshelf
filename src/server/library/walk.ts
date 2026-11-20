@@ -17,7 +17,7 @@ export function isIgnoredRelPath(rel: string): boolean {
   return rel.split("/").some((seg) => seg.startsWith(".")) || PARTIAL.test(rel);
 }
 
-export function toRel(parts: string[]): string {
+export function toRel(parts: readonly string[]): string {
   return parts.join("/");
 }
 

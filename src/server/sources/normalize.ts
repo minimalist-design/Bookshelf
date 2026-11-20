@@ -1,3 +1,4 @@
+import { uniqueCaseless } from "../collections.ts";
 import { normalizeDate } from "../extract/text.ts";
 
 /** ISO 639-2 (bibliographic/terminologic) → 639-1 for common languages; others stay as given. */
@@ -8,6 +9,8 @@ const ISO_639_2: Record<string, string> = {
   rum: "ro", ron: "ro", ukr: "uk", cat: "ca", glg: "gl", baq: "eu", eus: "eu", ice: "is", isl: "is", per: "fa", fas: "fa",
 };
 
+const LANGUAGE_NAMES: Record<string, string> = { english: "en", german: "de", french: "fr", spanish: "es", italian: "it", russian: "ru", portuguese: "pt", japanese: "ja", chinese: "zh", dutch: "nl" };
+
 /** "eng", "/languages/eng", "en-US", "English" → "en" where known; lowercase otherwise. */
 export function normalizeLanguage(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -15,8 +18,7 @@ export function normalizeLanguage(raw: string | null | undefined): string | null
   if (!v) return null;
   if (/^[a-z]{2}([-_][a-z0-9]+)?$/.test(v)) return v.slice(0, 2);
   if (ISO_639_2[v]) return ISO_639_2[v];
-  const names: Record<string, string> = { english: "en", german: "de", french: "fr", spanish: "es", italian: "it", russian: "ru", portuguese: "pt", japanese: "ja", chinese: "zh", dutch: "nl" };
-  return names[v] ?? v;
+  return LANGUAGE_NAMES[v] ?? v;
 }
 
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -54,17 +56,10 @@ export function parseSeries(raw: string | null | undefined): { series: string | 
 const NOISE_SUBJECT = /(new york times|nyt:|accessible book|protected daisy|in library|large type|lending library|overdrive|internet archive|open library|staff picks|reviewed$)/i;
 
 /** Library subject headings → a short list of usable tags. */
-export function cleanSubjects(subjects: (string | null | undefined)[], max = 8): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of subjects) {
-    const s = raw?.replace(/\s+/g, " ").trim();
-    if (!s || s.length > 48 || NOISE_SUBJECT.test(s) || /[:=]/.test(s)) continue;
-    const key = s.toLowerCase().replace(/[,.]+$/, "");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(s.replace(/[,.]+$/, ""));
-    if (out.length >= max) break;
-  }
-  return out;
+export function cleanSubjects(subjects: readonly (string | null | undefined)[], max = 8): string[] {
+  const usable = subjects
+    .map((raw) => raw?.replace(/\s+/g, " ").trim())
+    .filter((s): s is string => !!s && s.length <= 48 && !NOISE_SUBJECT.test(s) && !/[:=]/.test(s))
+    .map((s) => s.replace(/[,.]+$/, ""));
+  return uniqueCaseless(usable).slice(0, max);
 }

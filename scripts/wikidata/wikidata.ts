@@ -165,7 +165,7 @@ export const times = (e: Entity, prop: string): WikidataTime[] =>
     .filter((v): v is WikidataTime => typeof v?.time === "string" && typeof v.precision === "number");
 
 const earliest = (ts: WikidataTime[]): WikidataTime | null =>
-  ts.filter((t) => timeToYear(t) !== null).sort((a, b) => timeToYear(a)! - timeToYear(b)!)[0] ?? null;
+  ts.filter((t) => timeToYear(t) !== null).toSorted((a, b) => timeToYear(a)! - timeToYear(b)!)[0] ?? null;
 
 /** Display name: English, then a name for many languages ('mul'), then the first there is. */
 export function pickText(texts: Record<string, Text> | undefined, prefer: readonly string[] = ["en", "mul"]): string | null {
@@ -412,7 +412,4 @@ export function entityRows(e: Entity, role: Role, langs: Languages, publisherNam
 
 /** Rows of several entities, by table. */
 export const mergeRows = (all: Rows[]): Rows =>
-  all.reduce<Rows>((acc, r) => {
-    for (const [table, rows] of Object.entries(r)) acc[table] = [...(acc[table] ?? []), ...(rows ?? [])];
-    return acc;
-  }, {});
+  Object.fromEntries([...new Set(all.flatMap((r) => Object.keys(r)))].map((table) => [table, all.flatMap((r) => r[table] ?? [])]));

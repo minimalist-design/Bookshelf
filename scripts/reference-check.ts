@@ -21,7 +21,7 @@ try {
   const problems = checkReferenceDb(db, { requireComplete: true });
   if (problems.length) {
     console.log(`Bookshelf wouldn't import ${file}:`);
-    problems.forEach((p) => console.log(`  - ${p}`));
+    console.log(problems.map((p) => `  - ${p}`).join("\n"));
     process.exit(1);
   }
   const meta = readMeta(db);

@@ -12,15 +12,20 @@ export function isInside(parent: string, child: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** Canonical path, or null when it doesn't exist. */
+function tryRealpath(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
 /** Validate a candidate library root; returns its canonical path. */
 export function validateLibraryRoot(input: string, dataDir: string): string {
   if (!input || !isAbsolute(input)) throw new ValidationError("Library root must be an absolute path");
-  let root: string;
-  try {
-    root = realpathSync(resolve(input));
-  } catch {
-    throw new ValidationError(`Directory does not exist: ${input}`);
-  }
+  const root = tryRealpath(resolve(input));
+  if (root === null) throw new ValidationError(`Directory does not exist: ${input}`);
   if (!statSync(root).isDirectory()) throw new ValidationError(`Not a directory: ${root}`);
   if (root === sep) throw new ValidationError("The filesystem root cannot be the library root");
   try {
@@ -28,12 +33,7 @@ export function validateLibraryRoot(input: string, dataDir: string): string {
   } catch {
     throw new ValidationError(`Directory is not readable and writable: ${root}`);
   }
-  let data = resolve(dataDir);
-  try {
-    data = realpathSync(data);
-  } catch {
-    /* data dir may not exist yet */
-  }
+  const data = tryRealpath(resolve(dataDir)) ?? resolve(dataDir); // the data dir may not exist yet
   if (isInside(root, data)) throw new ValidationError("The data directory must not be inside the library root");
   if (isInside(data, root)) throw new ValidationError("The library root must not be inside the data directory");
   return root;

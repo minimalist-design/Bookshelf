@@ -10,8 +10,8 @@ import { openDatabase } from "../src/server/db/index.ts";
 import { loadConfig } from "../src/server/config.ts";
 import type { ConfigFileSettings } from "../src/server/configFile.ts";
 import { getSettings, prepareConfigLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
-import { health } from "../src/server/api/health.ts";
 import { validateShelfName, ValidationError } from "../src/server/library/paths.ts";
+import * as settingsRepo from "../src/server/db/repo/settings.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "bookshelf-test-"));
 const apps: AppContext[] = [];
@@ -72,7 +72,7 @@ describe("database", () => {
 
 describe("health", () => {
   test("answers 200 while the database works", async () => {
-    const res = health(makeApp());
+    const res = makeApp().health();
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({ ok: true });
@@ -82,7 +82,7 @@ describe("health", () => {
     const app = makeApp();
     await app.library.close();
     app.db.close();
-    const res = health(app);
+    const res = app.health();
     expect(res.status).toBe(503);
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect((await res.json()).ok).toBe(false);
@@ -142,7 +142,7 @@ describe("settings", () => {
     writeFileSync(join(lib, "Shelf", "book.epub"), "x");
     updateSettings(app, { libraryRoot: lib });
     expect(updateSettings(app, { libraryRoot: null }).libraryRoot).toBeNull();
-    expect(app.settings.get("libraryRoot")).toBeNull();
+    expect(settingsRepo.get(app.db, "libraryRoot")).toBeNull();
     await app.library.whenReady();
     expect(app.library.status()).toMatchObject({ state: "no-root", root: null, fileCount: 0, watching: false });
     expect(existsSync(join(lib, "Shelf", "book.epub"))).toBe(true);

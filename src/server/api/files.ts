@@ -23,6 +23,16 @@ interface ServeOptions {
   cacheControl?: string;
 }
 
+/** The byte range a single-range `Range` header asks for in a file of `size` bytes; null when it can't be satisfied. */
+export function parseRange(header: string, size: number): { start: number; end: number } | null {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (!m[1] && !m[2])) return null;
+  // "bytes=-N" is a suffix range: the last N bytes.
+  const [start, end] = m[1] ? [Number(m[1]), m[2] ? Number(m[2]) : size - 1] : [Math.max(0, size - Number(m[2])), size - 1];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return null;
+  return { start, end: Math.min(end, size - 1) };
+}
+
 /**
  * Serve a file with ETag revalidation and single-range requests (pdf.js and media
  * players fetch byte ranges). HEAD returns headers only.
@@ -36,8 +46,8 @@ export function serveFile(req: Request, path: string, opts: ServeOptions): Respo
     ETag: etag,
     "Content-Type": opts.contentType,
     "Cache-Control": opts.cacheControl ?? "private, no-cache",
+    ...(opts.disposition ? { "Content-Disposition": opts.disposition } : {}),
   };
-  if (opts.disposition) headers["Content-Disposition"] = opts.disposition;
   const head = req.method === "HEAD";
 
   if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
@@ -45,21 +55,11 @@ export function serveFile(req: Request, path: string, opts: ServeOptions): Respo
   const range = req.headers.get("range");
   const ifRange = req.headers.get("if-range");
   if (range && (!ifRange || ifRange === etag)) {
-    const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
-    let start = m && m[1] ? Number(m[1]) : NaN;
-    let end = m && m[2] ? Number(m[2]) : NaN;
-    if (m && !m[1] && m[2]) {
-      start = Math.max(0, size - Number(m[2])); // suffix range: last N bytes
-      end = size - 1;
-    } else if (m && m[1] && !m[2]) end = size - 1;
-    if (!m || !Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
-      return new Response(null, { status: 416, headers: { ...headers, "Content-Range": `bytes */${size}` } });
-    }
-    end = Math.min(end, size - 1);
-    const length = end - start + 1;
-    return new Response(head ? null : file.slice(start, end + 1), {
+    const r = parseRange(range, size);
+    if (!r) return new Response(null, { status: 416, headers: { ...headers, "Content-Range": `bytes */${size}` } });
+    return new Response(head ? null : file.slice(r.start, r.end + 1), {
       status: 206,
-      headers: { ...headers, "Content-Range": `bytes ${start}-${end}/${size}`, "Content-Length": String(length) },
+      headers: { ...headers, "Content-Range": `bytes ${r.start}-${r.end}/${size}`, "Content-Length": String(r.end - r.start + 1) },
     });
   }
   return new Response(head ? null : file, { headers: { ...headers, "Content-Length": String(size) } });

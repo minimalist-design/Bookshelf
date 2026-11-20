@@ -3,14 +3,14 @@ import type { BookFormat } from "../naming/formats.ts";
 /** A book file currently present on disk. */
 export interface IndexedFile {
   relPath: string; // POSIX-style path relative to the library root
-  filename: string;
+  readonly filename: string;
   shelf: string | null; // null = Unshelved (directly in root)
-  format: BookFormat;
-  size: number;
-  mtimeMs: number;
-  ino: number;
-  hash: string;
-  bookId: number;
+  readonly format: BookFormat;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ino: number;
+  readonly hash: string;
+  readonly bookId: number;
 }
 
 export function shelfOf(relPath: string): string | null {
@@ -18,103 +18,91 @@ export function shelfOf(relPath: string): string | null {
   return i === -1 ? null : relPath.slice(0, i);
 }
 
+/** Identity of a file on disk regardless of its path (the same file, possibly moved). */
+export function inodeKey(ino: number, size: number, mtimeMs: number): string {
+  return `${ino}:${size}:${Math.trunc(mtimeMs)}`;
+}
+
 /**
  * The live view of which book files exist. Built from disk and kept in sync by the
  * watcher; this — never the database — decides what the library contains.
+ *
+ * It is mutable on purpose (a library can hold many thousands of files, changed one at a time);
+ * every change happens under the linker's lock, so there is a single writer.
  */
-export class LibraryIndex {
-  private readonly files = new Map<string, IndexedFile>();
-  private readonly byBook = new Map<number, Set<string>>();
-  private readonly byInode = new Map<string, string>();
-
-  private static inodeKey(ino: number, size: number, mtimeMs: number): string {
-    return `${ino}:${size}:${Math.trunc(mtimeMs)}`;
-  }
-
-  get size(): number {
-    return this.files.size;
-  }
-
-  get(relPath: string): IndexedFile | undefined {
-    return this.files.get(relPath);
-  }
-
-  set(file: IndexedFile): void {
-    this.remove(file.relPath);
-    this.files.set(file.relPath, file);
-    let set = this.byBook.get(file.bookId);
-    if (!set) this.byBook.set(file.bookId, (set = new Set()));
-    set.add(file.relPath);
-    this.byInode.set(LibraryIndex.inodeKey(file.ino, file.size, file.mtimeMs), file.relPath);
-  }
-
+export interface LibraryIndex {
+  readonly size: number;
+  get(relPath: string): IndexedFile | undefined;
+  set(file: IndexedFile): void;
   /** Indexed file with the same inode, size and mtime (i.e. the same file, possibly moved). */
-  findByInode(ino: number, size: number, mtimeMs: number): IndexedFile | undefined {
-    const rel = this.byInode.get(LibraryIndex.inodeKey(ino, size, mtimeMs));
-    return rel === undefined ? undefined : this.files.get(rel);
-  }
-
-  remove(relPath: string): IndexedFile | undefined {
-    const f = this.files.get(relPath);
-    if (!f) return undefined;
-    this.files.delete(relPath);
-    const key = LibraryIndex.inodeKey(f.ino, f.size, f.mtimeMs);
-    if (this.byInode.get(key) === relPath) this.byInode.delete(key);
-    const set = this.byBook.get(f.bookId);
-    set?.delete(relPath);
-    if (set && set.size === 0) this.byBook.delete(f.bookId);
-    return f;
-  }
-
+  findByInode(ino: number, size: number, mtimeMs: number): IndexedFile | undefined;
+  remove(relPath: string): IndexedFile | undefined;
   /** Remove every file under a directory (relative path without trailing slash). */
-  removeUnder(dirRel: string): IndexedFile[] {
-    const prefix = dirRel === "" ? "" : `${dirRel}/`;
-    const removed: IndexedFile[] = [];
-    for (const rel of [...this.files.keys()]) {
-      if (rel.startsWith(prefix)) removed.push(this.remove(rel)!);
-    }
-    return removed;
-  }
-
-  filesUnder(dirRel: string): IndexedFile[] {
-    const prefix = dirRel === "" ? "" : `${dirRel}/`;
-    return [...this.files.values()].filter((f) => f.relPath.startsWith(prefix));
-  }
-
-  filesOfBook(bookId: number): IndexedFile[] {
-    const set = this.byBook.get(bookId);
-    return set ? [...set].map((rel) => this.files.get(rel)!).sort((a, b) => a.format.localeCompare(b.format)) : [];
-  }
-
-  hasBook(bookId: number): boolean {
-    return this.byBook.has(bookId);
-  }
-
+  removeUnder(dirRel: string): IndexedFile[];
+  filesUnder(dirRel: string): IndexedFile[];
+  /** The book's files, ordered by format. */
+  filesOfBook(bookId: number): IndexedFile[];
+  hasBook(bookId: number): boolean;
   /** Whether the book already has an on-disk file of this format (other than `exceptRel`). */
-  bookHasFormat(bookId: number, format: BookFormat, exceptRel?: string): boolean {
-    const set = this.byBook.get(bookId);
-    if (!set) return false;
-    for (const rel of set) if (rel !== exceptRel && this.files.get(rel)!.format === format) return true;
-    return false;
-  }
-
+  bookHasFormat(bookId: number, format: BookFormat, exceptRel?: string): boolean;
   /** On-disk file with this content hash, if any. */
-  fileWithHash(hash: string): IndexedFile | undefined {
-    for (const f of this.files.values()) if (f.hash === hash) return f;
-    return undefined;
-  }
+  fileWithHash(hash: string): IndexedFile | undefined;
+  bookIds(): number[];
+  allFiles(): MapIterator<IndexedFile>;
+  clear(): void;
+}
 
-  bookIds(): number[] {
-    return [...this.byBook.keys()];
-  }
+const under = (dirRel: string) => (dirRel === "" ? "" : `${dirRel}/`);
 
-  allFiles(): IterableIterator<IndexedFile> {
-    return this.files.values();
-  }
+export function createLibraryIndex(): LibraryIndex {
+  const files = new Map<string, IndexedFile>();
+  const byBook = new Map<number, Set<string>>();
+  const byInode = new Map<string, string>();
 
-  clear(): void {
-    this.files.clear();
-    this.byBook.clear();
-    this.byInode.clear();
-  }
+  const remove = (relPath: string): IndexedFile | undefined => {
+    const f = files.get(relPath);
+    if (!f) return undefined;
+    files.delete(relPath);
+    const key = inodeKey(f.ino, f.size, f.mtimeMs);
+    if (byInode.get(key) === relPath) byInode.delete(key);
+    const set = byBook.get(f.bookId);
+    set?.delete(relPath);
+    if (set && set.size === 0) byBook.delete(f.bookId);
+    return f;
+  };
+
+  const filesOfBook = (bookId: number): IndexedFile[] =>
+    [...(byBook.get(bookId) ?? [])].map((rel) => files.get(rel)!).toSorted((a, b) => a.format.localeCompare(b.format));
+
+  return {
+    get size() {
+      return files.size;
+    },
+    get: (relPath) => files.get(relPath),
+    set(file) {
+      remove(file.relPath);
+      files.set(file.relPath, file);
+      byBook.set(file.bookId, (byBook.get(file.bookId) ?? new Set()).add(file.relPath));
+      byInode.set(inodeKey(file.ino, file.size, file.mtimeMs), file.relPath);
+    },
+    findByInode(ino, size, mtimeMs) {
+      const rel = byInode.get(inodeKey(ino, size, mtimeMs));
+      return rel === undefined ? undefined : files.get(rel);
+    },
+    remove,
+    removeUnder: (dirRel) =>
+      [...files.keys()].filter((rel) => rel.startsWith(under(dirRel))).map((rel) => remove(rel)!),
+    filesUnder: (dirRel) => [...files.values()].filter((f) => f.relPath.startsWith(under(dirRel))),
+    filesOfBook,
+    hasBook: (bookId) => byBook.has(bookId),
+    bookHasFormat: (bookId, format, exceptRel) => filesOfBook(bookId).some((f) => f.relPath !== exceptRel && f.format === format),
+    fileWithHash: (hash) => files.values().find((f) => f.hash === hash),
+    bookIds: () => [...byBook.keys()],
+    allFiles: () => files.values(),
+    clear() {
+      files.clear();
+      byBook.clear();
+      byInode.clear();
+    },
+  };
 }

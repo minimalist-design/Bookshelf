@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectExternalTools } from "../src/server/config.ts";
-import { extractCbr, extractCbz } from "../src/server/extract/comic.ts";
-import { extractDjvu, parseDjvuMeta } from "../src/server/extract/djvu.ts";
+import { comicInfo, extractCbr, extractCbz, parseSevenZipListing } from "../src/server/extract/comic.ts";
+import { djvuMetaToRaw, extractDjvu, parseDjvuMeta } from "../src/server/extract/djvu.ts";
 import { extractEpub } from "../src/server/extract/epub.ts";
 import { extractFb2 } from "../src/server/extract/fb2.ts";
 import { createExtractor } from "../src/server/extract/index.ts";
@@ -12,7 +12,7 @@ import { isJunkAuthor, isJunkTitle } from "../src/server/extract/junk.ts";
 import { mergeMetadata } from "../src/server/extract/merge.ts";
 import { extractPdf } from "../src/server/extract/pdf.ts";
 import { htmlToText, normalizeDate } from "../src/server/extract/text.ts";
-import { ZipArchive } from "../src/server/extract/zip.ts";
+import { openZip, readEntryText } from "../src/server/extract/zip.ts";
 import { parseFilename } from "../src/server/naming/parseFilename.ts";
 import { makeEpub, makeFb2, makeJpeg, makePdf, makePng, makeZip, xmpPacket } from "./fixtures.ts";
 
@@ -36,15 +36,15 @@ describe("zip reader", () => {
   test("reads stored and deflated entries, case-insensitive lookup", async () => {
     const big = "x".repeat(100_000);
     const p = write("a.zip", makeZip({ "Dir/Hello.txt": "hello", "big.txt": big }));
-    const zip = await ZipArchive.open(p);
-    expect(zip.entries.map((e) => e.name).sort()).toEqual(["Dir/Hello.txt", "big.txt"]);
-    expect(await zip.readText("dir/hello.TXT")).toBe("hello");
-    expect(await zip.readText("big.txt")).toBe(big);
-    expect(await zip.readText("missing")).toBeNull();
+    const zip = await openZip(p);
+    expect(zip.entries.map((e) => e.name).toSorted()).toEqual(["Dir/Hello.txt", "big.txt"]);
+    expect(await readEntryText(zip, "dir/hello.TXT")).toBe("hello");
+    expect(await readEntryText(zip, "big.txt")).toBe(big);
+    expect(await readEntryText(zip, "missing")).toBeNull();
   });
 
   test("rejects non-zip files", async () => {
-    expect(ZipArchive.open(write("x.zip", "not a zip at all, definitely not"))).rejects.toThrow();
+    expect(openZip(write("x.zip", "not a zip at all, definitely not"))).rejects.toThrow();
   });
 });
 
@@ -363,5 +363,35 @@ describe("merge + junk", () => {
     expect(normalizeDate("2010-05-01T00:00:00Z")).toBe("2010-05-01");
     expect(normalizeDate("0101-01-01")).toBeNull();
     expect(normalizeDate("circa 1850")).toBe("1850");
+  });
+});
+
+describe("pure readers", () => {
+  test("7-Zip listing: files only, backslashes become slashes", () => {
+    const listing = [
+      "Path = Comic\nFolder = +\nSize = 0",
+      "Path = Comic\\01.jpg\nFolder = -\nSize = 10",
+      "Path = Comic\\sub\nAttributes = D_ drwxr-xr-x",
+      "Path = ComicInfo.xml\nFolder = -",
+    ].join("\n\n");
+    expect(parseSevenZipListing(listing)).toEqual(["Comic/01.jpg", "ComicInfo.xml"]);
+  });
+
+  test("ComicInfo: series title, index and a front cover inside the page range", () => {
+    const ci = { Series: "Saga", Number: "3", Year: "2013", Month: "4", Pages: { Page: [{ "@_Image": "1", "@_Type": "FrontCover" }] } };
+    const { meta, frontCoverIndex } = comicInfo(ci, 2);
+    expect(meta).toMatchObject({ title: "Saga #3", series: "Saga", seriesIndex: 3, publishedDate: "2013-04" });
+    expect(frontCoverIndex).toBe(1);
+    expect(comicInfo(ci, 1).frontCoverIndex).toBeNull();
+  });
+
+  test("DjVu metadata: the page count only when positive", () => {
+    expect(djvuMetaToRaw({ title: "T", author: "A", isbn: "9780441172719" }, 12)).toMatchObject({
+      title: "T",
+      authors: ["A"],
+      isbn13: "9780441172719",
+      pages: 12,
+    });
+    expect(djvuMetaToRaw({}, Number.NaN).pages).toBeUndefined();
   });
 });

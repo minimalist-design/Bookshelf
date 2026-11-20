@@ -39,7 +39,7 @@ const CAPITALISED = /^\p{Lu}[\p{L}'’.-]*$/u;
 const ROMAN = /^(?:[IVX]+|[ivx]+)$/;
 
 /** "The Republic", "A gentle introduction" — but not "A. Smith" or "A J Smith". */
-function leadingArticle(tokens: string[], lower: string[]): boolean {
+function leadingArticle(tokens: readonly string[], lower: readonly string[]): boolean {
   if (tokens.length < 2 || !LEADING_ARTICLES.has(lower[0]!) || /\.$/.test(tokens[0]!)) return false;
   return lower[0] !== "a" || (tokens.length > 2 && !INITIAL.test(tokens[1]!));
 }

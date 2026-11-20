@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiRoutes } from "../src/server/api/router.ts";
-import { createApp, type AppContext } from "../src/server/app.ts";
-import { loadConfig } from "../src/server/config.ts";
+import type { AppContext } from "../src/server/app.ts";
 import { applyRules, type RuleFields } from "../src/server/metadata/rules.ts";
 import { pickMetadata } from "../src/server/metadata/types.ts";
-import { makeEpub } from "./fixtures.ts";
+import { closeTestApp, makeEpub, scratchDir, SLOW_RETENTION, testApp } from "./fixtures.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
+import * as books from "../src/server/services/books.ts";
+import * as maintenance from "../src/server/services/maintenance.ts";
 
 const delphi = (over: Partial<RuleFields> = {}): RuleFields => ({
   publisher: "Delphi Classics",
@@ -55,16 +56,10 @@ describe("metadata rules in the library", () => {
   let app: AppContext;
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "bookshelf-rules-"));
-    root = join(tmp, "library");
-    mkdirSync(join(root, "S"), { recursive: true });
-    app = createApp(loadConfig({ data_dir: join(tmp, "data") }), { library: { debounceMs: 30, stableMs: 80, graceMs: 60_000 } });
+    ({ tmp, root } = scratchDir("rules", ["S"]));
+    app = testApp(tmp, {}, { library: SLOW_RETENTION });
   });
-  afterEach(async () => {
-    await app.library.close();
-    app.db.close();
-    rmSync(tmp, { recursive: true, force: true });
-  });
+  afterEach(() => closeTestApp(app, tmp));
 
   const idOf = (rel: string) => app.library.index.get(rel)!.bookId;
 
@@ -80,7 +75,7 @@ describe("metadata rules in the library", () => {
     });
     writeFileSync(join(root, "S/pickwick.epub"), epub);
     await app.library.open(root);
-    expect(app.books.get(idOf("S/pickwick.epub"))).toMatchObject({
+    expect(bookRepo.get(app.db, idOf("S/pickwick.epub"))).toMatchObject({
       publisher: "Delphi Classics",
       series: "Parts Edition",
       seriesIndex: 3,
@@ -95,9 +90,9 @@ describe("metadata rules in the library", () => {
     await app.library.open(root);
     const old = idOf("S/Old -- Author.epub");
     const confirmed = idOf("S/Confirmed -- Author.epub");
-    await app.bookService.update(confirmed, { rating: 4 }); // a manual edit confirms
+    await books.update(app, confirmed, { rating: 4 }); // a manual edit confirms
     // Metadata as imported before the rule existed.
-    for (const id of [old, confirmed]) app.books.updateMetadata(id, { ...pickMetadata(app.books.get(id)!), ...delphi() }, null);
+    for (const id of [old, confirmed]) bookRepo.updateMetadata(app.db, id, { ...pickMetadata(bookRepo.get(app.db, id)!), ...delphi() }, null);
 
     const server = Bun.serve({ port: 0, routes: apiRoutes(app) });
     try {
@@ -106,9 +101,9 @@ describe("metadata rules in the library", () => {
     } finally {
       server.stop(true);
     }
-    expect(app.books.get(old)).toMatchObject({ series: "Parts Edition", seriesIndex: 3, tags: ["Fiction"], description: null });
-    expect(app.books.get(confirmed)).toMatchObject({ series: null, description: "www.delphiclassics.com" });
+    expect(bookRepo.get(app.db, old)).toMatchObject({ series: "Parts Edition", seriesIndex: 3, tags: ["Fiction"], description: null });
+    expect(bookRepo.get(app.db, confirmed)).toMatchObject({ series: null, description: "www.delphiclassics.com" });
     // Nothing left to change the second time.
-    expect(await app.maintenance.applyMetadataRules()).toEqual({ changed: 0 });
+    expect(await maintenance.applyMetadataRules(app)).toEqual({ changed: 0 });
   });
 });

@@ -1,3 +1,6 @@
+import { uniqueCaseless } from "../collections.ts";
+
+const PARTICLE = /^(van|von|der|den|de|del|della|di|da|du|la|le|ter|ten|bin|ibn|al)$/;
 const ET_AL = /\s*,?\s+(et\s+al\.?|and\s+others)\s*$/i;
 
 function clean(s: string): string {
@@ -33,8 +36,8 @@ export function toSortName(display: string): string {
   const tokens = n.split(" ");
   if (tokens.length < 2) return n;
   // Keep lowercase particles with the surname: "Ludwig van Beethoven" → "van Beethoven, Ludwig".
-  let i = tokens.length - 1;
-  while (i > 1 && /^(van|von|der|den|de|del|della|di|da|du|la|le|ter|ten|bin|ibn|al)$/.test(tokens[i - 1]!)) i--;
+  // The surname starts after the last token (but the first) that is not a particle.
+  const i = tokens.slice(0, -1).findLastIndex((t, k) => k === 0 || !PARTICLE.test(t)) + 1;
   const surname = tokens.slice(i).join(" ");
   const given = tokens.slice(0, i).join(" ");
   // Generational suffixes stay at the end: "Martin Luther King Jr." → "King, Martin Luther, Jr."
@@ -75,24 +78,10 @@ export function splitAuthors(raw: string | null | undefined): string[] {
   const input = clean(raw).replace(ET_AL, "");
   if (!input) return [];
 
-  let parts: string[];
-  if (input.includes(";")) {
-    parts = input.split(";");
-  } else {
-    const byConj = input.split(/\s+(?:&|and)\s+/i);
-    parts = byConj.flatMap((p) => splitCommaList(p));
-  }
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of parts) {
-    const name = toDisplayName(p);
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(name);
-  }
-  return out;
+  const parts = input.includes(";")
+    ? input.split(";")
+    : input.split(/\s+(?:&|and)\s+/i).flatMap((p) => splitCommaList(p));
+  return uniqueCaseless(parts.map(toDisplayName).filter(Boolean));
 }
 
 function splitCommaList(s: string): string[] {

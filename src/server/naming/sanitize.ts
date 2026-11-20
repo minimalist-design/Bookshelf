@@ -2,21 +2,25 @@
  * Make a string safe as part of a filename on Linux and portable to SMB/Windows shares.
  * Also neutralizes separators that the filename parsers rely on.
  */
+const REPLACEMENTS: [RegExp, string][] = [
+  [/[\u0000-\u001f\u007f]/g, " "],
+  [/\s*:\s*/g, " - "], // "Title: Subtitle" → "Title - Subtitle"
+  [/[\/\\]/g, "_"],
+  [/"/g, "'"],
+  [/[<>]/g, ""],
+  [/[*?]/g, ""],
+  [/\|/g, "-"],
+  [/\s+-{2,}\s+/g, " - "], // never emit the import separator " -- "
+  [/\[/g, "("], // brackets are reserved for the ID
+  [/\]/g, ")"],
+  [/\s+/g, " "],
+  [/^\s+|\s+$/g, ""],
+  [/^[.\s]+/, ""], // no hidden files
+];
+
 export function sanitizeComponent(input: string, trimTrailingDots = true): string {
-  let s = input.normalize("NFC");
-  s = s.replace(/[\u0000-\u001f\u007f]/g, " ");
-  s = s.replace(/\s*:\s*/g, " - "); // "Title: Subtitle" → "Title - Subtitle"
-  s = s.replace(/[\/\\]/g, "_");
-  s = s.replace(/"/g, "'");
-  s = s.replace(/[<>]/g, "");
-  s = s.replace(/[*?]/g, "");
-  s = s.replace(/\|/g, "-");
-  s = s.replace(/\s+-{2,}\s+/g, " - "); // never emit the import separator " -- "
-  s = s.replace(/[\[\]]/g, (c) => (c === "[" ? "(" : ")")); // brackets are reserved for the ID
-  s = s.replace(/\s+/g, " ").trim();
-  s = s.replace(/^[.\s]+/, ""); // no hidden files
-  s = trimTrailingDots ? s.replace(/[.\s]+$/, "") : s.trimEnd(); // no trailing dots/spaces at name end
-  return s;
+  const s = REPLACEMENTS.reduce((acc, [pattern, by]) => acc.replace(pattern, by), input.normalize("NFC"));
+  return trimTrailingDots ? s.replace(/[.\s]+$/, "") : s.trimEnd(); // no trailing dots/spaces at name end
 }
 
 /** Author part must not contain " - " (the library-pattern separator). */

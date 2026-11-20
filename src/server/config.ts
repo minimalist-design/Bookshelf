@@ -4,26 +4,30 @@ import { mkdirSync } from "node:fs";
 import { expandTilde, type ConfigFileSettings } from "./configFile.ts";
 
 export interface AppConfig {
-  dataDir: string;
-  dbPath: string;
-  coversDir: string;
+  readonly dataDir: string;
+  readonly dbPath: string;
+  readonly coversDir: string;
+  /** Imported reference files (authors and books), one SQLite file per source. */
+  readonly referenceDir: string;
+  /** Cover images of the kept ISBNdb records. */
+  readonly isbndbCoversDir: string;
   /** The configured port; null when none is assigned yet (`"port": 0`), and one is picked on first start. */
-  port: number | null;
-  hostname: string;
+  readonly port: number | null;
+  readonly hostname: string;
   /** Library root set in the config file (`library_root`); overrides and locks the `libraryRoot` setting when present. */
-  configLibraryRoot: string | null;
-  isProduction: boolean;
+  readonly configLibraryRoot: string | null;
+  readonly isProduction: boolean;
   /** Largest accepted upload (`max_upload_mb`, default 16 GiB). */
-  maxUploadBytes: number;
-  isbndb: IsbndbConfig;
+  readonly maxUploadBytes: number;
+  readonly isbndb: IsbndbConfig;
 }
 
 /** ISBNdb: the key comes from the environment (`ISBNDB_API_KEY`), the plan's limits from the config file. */
 export interface IsbndbConfig {
   /** Null: ISBNdb is not used. Never logged or sent anywhere but ISBNdb. */
-  apiKey: string | null;
-  dailyLimit: number;
-  perSecond: number;
+  readonly apiKey: string | null;
+  readonly dailyLimit: number;
+  readonly perSecond: number;
 }
 
 /** The secrets read from the environment; `.env.example` lists exactly these (a test checks it). */
@@ -43,6 +47,8 @@ export function loadConfig(file: ConfigFileSettings = {}, env: Record<string, st
     dataDir,
     dbPath: join(dataDir, "bookshelf.db"),
     coversDir: join(dataDir, "covers"),
+    referenceDir: join(dataDir, "reference"),
+    isbndbCoversDir: join(dataDir, "isbndb-covers"),
     port: file.port ? file.port : null,
     hostname: file.host || "0.0.0.0",
     configLibraryRoot: file.library_root ? resolve(expandTilde(file.library_root)) : null,
@@ -61,17 +67,16 @@ export function loadConfig(file: ConfigFileSettings = {}, env: Record<string, st
 const positive = (v: number | undefined): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
 
 export function ensureDataDirs(config: AppConfig): void {
-  mkdirSync(config.dataDir, { recursive: true });
-  mkdirSync(config.coversDir, { recursive: true });
+  for (const dir of [config.dataDir, config.coversDir, config.referenceDir, config.isbndbCoversDir]) mkdirSync(dir, { recursive: true });
 }
 
 /** Optional external CLI tools; absence only degrades metadata/cover extraction for some formats. */
 export interface ExternalTools {
-  sevenZip: string | null;
-  unrar: string | null;
-  djvused: string | null;
-  ddjvu: string | null;
-  pdftoppm: string | null;
+  readonly sevenZip: string | null;
+  readonly unrar: string | null;
+  readonly djvused: string | null;
+  readonly ddjvu: string | null;
+  readonly pdftoppm: string | null;
 }
 
 export function detectExternalTools(): ExternalTools {

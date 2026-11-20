@@ -16,7 +16,7 @@ config: ${tilde(configPath())}
 `;
 
 /** Runs `bookshelf config <args>`; returns the exit code. */
-export function configCommand(args: string[]): number {
+export function configCommand(args: readonly string[]): number {
   const [sub, pathArg, ...extra] = args;
   if (!sub || extra.length > 0) {
     console.error("usage: bookshelf config version|update|path|template [CONFIG]");

@@ -88,50 +88,71 @@ function empty(): CandidateMetadata {
   };
 }
 
-function label(parts: (string | number | null | undefined)[]): string {
+function label(parts: readonly (string | number | null | undefined)[]): string {
   return ["Open Library", ...parts.filter((p) => p !== null && p !== undefined && p !== "")].join(" · ");
 }
+
+const hasTitle = (rec: OlBooksData | undefined): rec is OlBooksData & { title: string } => !!rec?.title;
+
+/** What the books API record says about the edition. */
+function fromBooksData(rec: OlBooksData & { title: string }, isbn13: string): CandidateMetadata {
+  return {
+    ...empty(),
+    title: rec.title.trim(),
+    subtitle: rec.subtitle?.trim() || null,
+    authors: (rec.authors ?? []).map((a) => a.name?.trim() ?? "").filter(Boolean),
+    isbn13: normalizeIsbn(rec.identifiers?.isbn_13?.[0]) ?? isbn13,
+    publisher: rec.publishers?.[0]?.name?.trim() || null,
+    publishedDate: parseLooseDate(rec.publish_date),
+    pages: rec.number_of_pages && rec.number_of_pages > 0 ? rec.number_of_pages : null,
+    tags: cleanSubjects((rec.subjects ?? []).map((s) => s.name)),
+  };
+}
+
+/** The edition record adds edition, language, series and description; a subtitle only fills a gap. */
+function withEdition(m: CandidateMetadata, ed: OlEdition): CandidateMetadata {
+  const { series, seriesIndex } = parseSeries(ed.series?.[0]);
+  return {
+    ...m,
+    subtitle: m.subtitle ?? (ed.subtitle?.trim() || null),
+    edition: ed.edition_name?.replace(/\s+/g, " ").trim() || null,
+    language: normalizeLanguage(ed.languages?.[0]?.key),
+    series,
+    seriesIndex,
+    description: cleanDescription(text(ed.description)),
+  };
+}
+
+/** The work fills a missing description and missing tags. */
+function withWork(m: CandidateMetadata, work: OlWork): CandidateMetadata {
+  return {
+    ...m,
+    description: m.description ?? cleanDescription(text(work.description)),
+    tags: m.tags.length ? m.tags : cleanSubjects(work.subjects ?? []),
+  };
+}
+
+const workKeyOf = (ed: OlEdition | null): string | null => ed?.works?.[0]?.key?.replace("/works/", "") ?? null;
+const editionCoverUrl = (ed: OlEdition | null): string | null => {
+  const id = ed?.covers?.[0];
+  return id && id > 0 ? olCoverUrl(id) : null;
+};
 
 /** Edition by ISBN (+ its edition record and work for language, series, description). */
 export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promise<MetadataCandidate | null> {
   const data = await http.getJson<Record<string, OlBooksData>>(`${OL}/api/books?bibkeys=ISBN:${isbn13}&jscmd=data&format=json`);
   const rec = data?.[`ISBN:${isbn13}`];
-  if (!rec?.title) return null;
-
-  const m = empty();
-  m.title = rec.title.trim();
-  m.subtitle = rec.subtitle?.trim() || null;
-  m.authors = (rec.authors ?? []).map((a) => a.name?.trim() ?? "").filter(Boolean);
-  m.isbn13 = normalizeIsbn(rec.identifiers?.isbn_13?.[0]) ?? isbn13;
-  m.publisher = rec.publishers?.[0]?.name?.trim() || null;
-  m.publishedDate = parseLooseDate(rec.publish_date);
-  m.pages = rec.number_of_pages && rec.number_of_pages > 0 ? rec.number_of_pages : null;
-  m.tags = cleanSubjects((rec.subjects ?? []).map((s) => s.name));
+  if (!hasTitle(rec)) return null;
 
   const editionKey = rec.identifiers?.openlibrary?.[0] ?? null;
-  let workKey: string | null = null;
-  let coverUrl = rec.cover?.large ?? null;
-  if (editionKey) {
-    const ed = await optional(http.getJson<OlEdition>(`${OL}/books/${editionKey}.json`));
-    if (ed) {
-      m.subtitle ??= ed.subtitle?.trim() || null;
-      m.edition = ed.edition_name?.replace(/\s+/g, " ").trim() || null;
-      m.language = normalizeLanguage(ed.languages?.[0]?.key);
-      const series = parseSeries(ed.series?.[0]);
-      m.series = series.series;
-      m.seriesIndex = series.seriesIndex;
-      m.description = cleanDescription(text(ed.description));
-      workKey = ed.works?.[0]?.key?.replace("/works/", "") ?? null;
-      if (!coverUrl && ed.covers?.[0] && ed.covers[0] > 0) coverUrl = olCoverUrl(ed.covers[0]);
-    }
-  }
-  if (workKey && (!m.description || !m.tags.length)) {
-    const work = await optional(http.getJson<OlWork>(`${OL}/works/${workKey}.json`));
-    if (work) {
-      m.description ??= cleanDescription(text(work.description));
-      if (!m.tags.length) m.tags = cleanSubjects(work.subjects ?? []);
-    }
-  }
+  const ed = editionKey ? await optional(http.getJson<OlEdition>(`${OL}/books/${editionKey}.json`)) : null;
+  const fromEdition = ed ? withEdition(fromBooksData(rec, isbn13), ed) : fromBooksData(rec, isbn13);
+  const workKey = workKeyOf(ed);
+  const work =
+    workKey && (!fromEdition.description || !fromEdition.tags.length)
+      ? await optional(http.getJson<OlWork>(`${OL}/works/${workKey}.json`))
+      : null;
+  const m = work ? withWork(fromEdition, work) : fromEdition;
 
   return {
     source: "openlibrary",
@@ -140,7 +161,7 @@ export async function openLibraryByIsbn(http: HttpClient, isbn13: string): Promi
     url: editionKey ? `${OL}/books/${editionKey}` : (rec.url ?? `${OL}/isbn/${isbn13}`),
     label: label([m.publisher, m.edition ? formatEdition(m.edition) : null, m.publishedDate?.slice(0, 4), m.pages ? `${m.pages} pages` : null]),
     metadata: m,
-    coverUrl,
+    coverUrl: rec.cover?.large ?? editionCoverUrl(ed),
     olEditionKey: editionKey,
     olWorkKey: workKey,
   };
@@ -155,24 +176,24 @@ export async function openLibrarySearch(
   const params = new URLSearchParams({
     limit: String(limit),
     fields: "key,title,subtitle,author_name,first_publish_year,cover_i,cover_edition_key,number_of_pages_median,subject,language",
+    ...(query.q
+      ? { q: query.q }
+      : { ...(query.title ? { title: query.title } : {}), ...(query.author ? { author: query.author } : {}) }),
   });
-  if (query.q) params.set("q", query.q);
-  else {
-    if (query.title) params.set("title", query.title);
-    if (query.author) params.set("author", query.author);
-  }
   const res = await http.getJson<{ docs?: OlSearchDoc[] }>(`${OL}/search.json?${params}`);
   return (res?.docs ?? [])
     .filter((d) => d.title)
     .map((d) => {
-      const m = empty();
-      m.title = d.title!.trim();
-      m.subtitle = d.subtitle?.trim() || null;
-      m.authors = d.author_name ?? [];
-      m.publishedDate = d.first_publish_year ? String(d.first_publish_year) : null;
-      m.pages = d.number_of_pages_median ?? null;
-      m.tags = cleanSubjects(d.subject ?? []);
-      m.language = d.language?.length === 1 ? normalizeLanguage(d.language[0]) : null;
+      const m: CandidateMetadata = {
+        ...empty(),
+        title: d.title!.trim(),
+        subtitle: d.subtitle?.trim() || null,
+        authors: d.author_name ?? [],
+        publishedDate: d.first_publish_year ? String(d.first_publish_year) : null,
+        pages: d.number_of_pages_median ?? null,
+        tags: cleanSubjects(d.subject ?? []),
+        language: d.language?.length === 1 ? normalizeLanguage(d.language[0]) : null,
+      };
       const workKey = d.key.replace("/works/", "");
       return {
         source: "openlibrary" as const,
@@ -192,39 +213,40 @@ export async function openLibrarySearch(
  * Every cover of every edition of a work (editions often have their own cover). Edition records
  * only link to author keys, so the work's author names are passed in.
  */
-export async function openLibraryEditionCovers(http: HttpClient, workKey: string, authors: string[]): Promise<CoverOption[]> {
+export async function openLibraryEditionCovers(http: HttpClient, workKey: string, authors: readonly string[]): Promise<CoverOption[]> {
   // One request: the endpoint accepts a large limit (popular works have a few hundred editions).
   const res = await http.getJson<{ entries?: OlEditionEntry[] }>(`${OL}/works/${encodeURIComponent(workKey)}/editions.json?limit=1000`);
-  const out: CoverOption[] = [];
-  for (const e of res?.entries ?? []) {
-    const ids = (e.covers ?? []).filter((id) => id > 0);
-    if (!ids.length || !e.title) continue;
-    const isbn13 = normalizeIsbn(e.isbn_13?.[0]) ?? normalizeIsbn(e.isbn_10?.[0]);
-    const edition = e.edition_name?.replace(/\s+/g, " ").trim() || null;
-    const details = [
-      e.publishers?.[0]?.trim(),
-      edition ? formatEdition(edition) : null,
-      parseLooseDate(e.publish_date)?.slice(0, 4),
-      e.number_of_pages && e.number_of_pages > 0 ? `${e.number_of_pages} pages` : null,
-      e.physical_format?.trim(),
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    for (const id of ids) {
-      out.push({
-        coverUrl: olCoverUrl(id),
+  return editionCoverOptions(res?.entries ?? [], authors);
+}
+
+/** One cover option per cover image of each edition that has a title. */
+function editionCoverOptions(entries: readonly OlEditionEntry[], authors: readonly string[]): CoverOption[] {
+  return entries
+    .map((e) => ({ e, ids: (e.covers ?? []).filter((id) => id > 0) }))
+    .filter((x): x is { e: OlEditionEntry & { title: string }; ids: number[] } => x.ids.length > 0 && !!x.e.title)
+    .flatMap(({ e, ids }) => {
+      const edition = e.edition_name?.replace(/\s+/g, " ").trim() || null;
+      const details = [
+        e.publishers?.[0]?.trim(),
+        edition ? formatEdition(edition) : null,
+        parseLooseDate(e.publish_date)?.slice(0, 4),
+        e.number_of_pages && e.number_of_pages > 0 ? `${e.number_of_pages} pages` : null,
+        e.physical_format?.trim(),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const option = {
         url: `${OL}${e.key}`,
         title: e.title.trim(),
         subtitle: e.subtitle?.trim() || null,
         authors,
         details,
         language: normalizeLanguage(e.languages?.[0]?.key),
-        isbn13,
+        isbn13: normalizeIsbn(e.isbn_13?.[0]) ?? normalizeIsbn(e.isbn_10?.[0]),
         thisEdition: false,
-      });
-    }
-  }
-  return out;
+      };
+      return ids.map((id): CoverOption => ({ coverUrl: olCoverUrl(id), ...option }));
+    });
 }
 
 interface OlAuthorDoc {

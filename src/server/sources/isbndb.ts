@@ -3,7 +3,7 @@
  * search. Needs an API key (`ISBNDB_API_KEY`); every call counts against the plan's daily quota,
  * so lookups call it only when the user picks ISBNdb by name.
  *
- * Every record a call returns is kept for good in the local copy (`IsbndbRecordsRepo`), search
+ * Every record a call returns is kept for good in the local copy (`db/repo/isbndbRecords.ts`), search
  * results that were the wrong book included, and an ISBN lookup reads that copy before asking
  * ISBNdb: what the quota paid for once never has to be fetched again.
  */
@@ -11,7 +11,7 @@ import { formatEdition } from "../../shared/edition.ts";
 import type { CandidateMetadata, MetadataCandidate } from "../../shared/types.ts";
 import { htmlToText } from "../extract/text.ts";
 import { toDisplayName } from "../naming/authors.ts";
-import type { IsbndbRecord, IsbndbRecordsRepo } from "../db/repo/isbndbRecords.ts";
+import type { IsbndbRecord, IsbndbVia } from "../db/repo/isbndbRecords.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import { HttpError, ISBNDB_HOST, type HttpClient } from "./http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate } from "./normalize.ts";
@@ -22,7 +22,13 @@ const SITE = "https://isbndb.com";
 const SEARCH_PAGE_SIZE = 100;
 
 /** The local copy of records the lookups read and fill in. */
-export type IsbndbStore = Pick<IsbndbRecordsRepo, "get" | "has" | "putMany" | "containing">;
+export interface IsbndbStore {
+  get(isbn13: string): IsbndbRecord | null;
+  /** Store records (those without an ISBN-13 are skipped); returns how many were stored. */
+  putMany(records: readonly IsbndbRecord[], via: IsbndbVia, isbnOf: (r: IsbndbRecord) => string | null): number;
+  /** Records whose title or authors contain `word` (any case). */
+  containing(word: string, limit?: number): IsbndbRecord[];
+}
 
 /** A record's ISBN-13 (its key in the local copy). */
 export const isbnOfRecord = (r: IsbndbRecord): string | null =>
@@ -75,7 +81,7 @@ async function getJson<T>(http: HttpClient, url: string, apiKey: string, fresh: 
 /** The URL of one book, also its cache key. */
 export const isbndbBookUrl = (isbn13: string) => `${API}/book/${isbn13}`;
 
-const label = (parts: (string | number | null | undefined)[]) =>
+const label = (parts: readonly (string | number | null | undefined)[]) =>
   ["ISBNdb", ...parts.filter((p) => p !== null && p !== undefined && p !== "")].join(" · ");
 
 /** Tags: ISBNdb's genres (short, curated), else the main Thema subjects, else the deprecated subjects. */
@@ -157,11 +163,11 @@ export async function isbndbSearch(
 ): Promise<MetadataCandidate[]> {
   const text = (query.q ?? [query.title, query.author].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim().slice(0, 150);
   if (!text) return [];
-  const params = new URLSearchParams({ page: "1", pageSize: String(SEARCH_PAGE_SIZE) });
-  if (!query.q && query.title) {
-    params.set("column", "title");
-    params.set("shouldMatchAll", "true");
-  }
+  const params = new URLSearchParams({
+    page: "1",
+    pageSize: String(SEARCH_PAGE_SIZE),
+    ...(!query.q && query.title ? { column: "title", shouldMatchAll: "true" } : {}),
+  });
   // With a title-only column the author would never match: search the title, keep the author for ranking.
   const path = !query.q && query.title ? query.title.trim().slice(0, 150) : text;
   const data = await getJson<{ books?: IsbndbRecord[] }>(http, `${API}/books/${encodeURIComponent(path)}?${params}`, apiKey, fresh);
@@ -170,7 +176,7 @@ export async function isbndbSearch(
   const author = query.author?.toLowerCase().split(/\s+/).at(-1) ?? null;
   const candidates = records.map((b) => isbndbCandidate(b as IsbndbBook, "search")).filter((c): c is MetadataCandidate => c !== null);
   // The book's author first (by surname), keeping ISBNdb's order otherwise.
-  const ranked = author ? [...candidates].sort((a, b) => Number(hasAuthor(b, author)) - Number(hasAuthor(a, author))) : candidates;
+  const ranked = author ? candidates.toSorted((a, b) => Number(hasAuthor(b, author)) - Number(hasAuthor(a, author))) : candidates;
   return ranked.slice(0, limit);
 }
 
@@ -192,7 +198,7 @@ const titleWords = (t: string): string[] => words(t.split(":")[0]!);
  *   ("dune frank herbert" → Dune, but not Dune Messiah).
  */
 export function isbndbKeptSearch(
-  store: Pick<IsbndbRecordsRepo, "containing">,
+  store: Pick<IsbndbStore, "containing">,
   query: { title?: string | null; author?: string | null; q?: string | null },
   limit = 8,
 ): { candidates: MetadataCandidate[]; sure: boolean } {
@@ -202,7 +208,7 @@ export function isbndbKeptSearch(
   const searched = typed ?? [...wantedTitle!, ...(surname ? [surname] : [])];
   if (!searched.length) return { candidates: [], sure: false };
 
-  const seed = [...searched].sort((a, b) => b.length - a.length)[0]!;
+  const seed = searched.reduce((longest, w) => (w.length > longest.length ? w : longest));
   const authorWords = (r: IsbndbRecord) => (r.authors ?? []).flatMap((a) => words(a));
   const matches = store.containing(seed).filter((r) => {
     const all = new Set([...words(r.title ?? ""), ...authorWords(r)]);
@@ -214,7 +220,7 @@ export function isbndbKeptSearch(
     const names = new Set(authorWords(r));
     return searched.filter((w) => !names.has(w)).join(" ") === title;
   };
-  const ranked = [...matches].sort((a, b) => Number(isIt(b)) - Number(isIt(a)));
+  const ranked = matches.toSorted((a, b) => Number(isIt(b)) - Number(isIt(a)));
   const candidates = ranked
     .map((r) => isbndbCandidate(r as IsbndbBook, "search"))
     .filter((c): c is MetadataCandidate => c !== null)

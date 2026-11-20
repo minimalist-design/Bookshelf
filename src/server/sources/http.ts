@@ -1,24 +1,26 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Database } from "bun:sqlite";
 import type { MetadataUsageDto } from "../../shared/types.ts";
+import * as httpCache from "../db/repo/httpCache.ts";
+import * as httpCalls from "../db/repo/httpCalls.ts";
 
 export interface HttpResponse {
-  status: number;
-  body: string;
+  readonly status: number;
+  readonly body: string;
 }
 
 /** Pace for one host: minimum time between request starts (one request in flight at a time). */
 export interface HostLimit {
   /** Service name shown to the user. */
-  name?: string;
-  intervalMs: number;
+  readonly name?: string;
+  readonly intervalMs: number;
   /** Faster pace allowed once the requests carry a contact email (Open Library, Crossref polite pool). */
-  identifiedIntervalMs?: number;
+  readonly identifiedIntervalMs?: number;
   /** Published limit in requests per second (display only; null = none published). */
-  perSecond?: number | null;
-  identifiedPerSecond?: number;
+  readonly perSecond?: number | null;
+  readonly identifiedPerSecond?: number;
   /** Calls allowed per UTC day (ISBNdb); requests beyond it fail with QuotaExceededError instead of being sent. */
-  dailyLimit?: number;
+  readonly dailyLimit?: number;
 }
 
 /**
@@ -62,9 +64,9 @@ export const serviceName = (host: string): string => HOST_LIMITS[host]?.name ?? 
 
 /** Extra request details: headers (an API key), and what the request costs against a daily quota. */
 export interface RequestOptions {
-  headers?: Record<string, string>;
+  readonly headers?: Record<string, string>;
   /** Daily-quota calls this request is charged (default 1; 0 for requests outside the quota). */
-  cost?: number;
+  readonly cost?: number;
 }
 
 export interface HttpClientOptions {
@@ -159,17 +161,171 @@ const utcDayStart = (at: number) => Math.floor(at / DAY) * DAY;
 
 type Priority = "interactive" | "background";
 
-/** Per-host state: one request at a time, starts spaced out, cooldown after a 429. */
+interface Waiter {
+  priority: Priority;
+  wake: () => void;
+}
+
+/** What a service last reported as left of its daily quota. */
+interface ReportedQuota {
+  readonly left: number;
+  readonly resetAt: number;
+}
+
+/** Per-host state: one request at a time, starts spaced out, cooldown after a 429. Owned by one client. */
 interface HostState {
   busy: boolean;
-  waiters: { priority: Priority; wake: () => void }[];
+  waiters: Waiter[];
   nextStart: number;
   blockedUntil: number;
   strikes: number;
   advertisedMs: number;
-  /** What the service last reported as left of its daily quota. */
-  reportedDaily: { left: number; resetAt: number } | null;
+  reportedDaily: ReportedQuota | null;
 }
+
+// ---- pacing and quota rules ------------------------------------------------------
+
+/** Minimum time between request starts to a host: its limit (faster once identified), or what it advertises. */
+export function paceInterval(limit: HostLimit | undefined, defaultMs: number, identified: boolean, advertisedMs: number): number {
+  const base = !limit ? defaultMs : identified && limit.identifiedIntervalMs ? limit.identifiedIntervalMs : limit.intervalMs;
+  return Math.max(base, advertisedMs);
+}
+
+/** How long a host is left alone after a 429: its Retry-After (capped), else 1 min doubling per consecutive 429 (at most 30 min). */
+export function cooldownMs(retryAfterMs: number | null, strikes: number): number {
+  return retryAfterMs !== null ? Math.min(retryAfterMs, MAX_RETRY_AFTER_MS) : Math.min(BASE_COOLDOWN_MS * 2 ** (strikes - 1), MAX_COOLDOWN_MS);
+}
+
+/** Calls left today: the lower of our own count and the service's report; null when there's no daily quota. */
+export function quotaRemaining(dailyLimit: number | undefined, spent: number, reported: ReportedQuota | null): number | null {
+  const own = dailyLimit ? Math.max(0, dailyLimit - spent) : null;
+  if (own === null) return reported?.left ?? null;
+  return reported ? Math.min(own, reported.left) : own;
+}
+
+/** When `cost` more calls would go past a daily quota, the time it resets; null when the request may be sent. */
+export function quotaBlockedUntil(cost: number, dailyLimit: number | undefined, spent: number, reported: ReportedQuota | null, now: number): number | null {
+  if (cost <= 0) return null;
+  if (dailyLimit && spent + cost > dailyLimit) return utcDayStart(now) + DAY;
+  if (reported && reported.left < cost) return reported.resetAt;
+  return null;
+}
+
+/** Where a new waiter joins a host's queue: interactive requests go before queued background ones. */
+export function queuePosition(waiters: readonly { priority: Priority }[], priority: Priority): number {
+  const i = priority === "interactive" ? waiters.findIndex((w) => w.priority === "background") : -1;
+  return i < 0 ? waiters.length : i;
+}
+
+/** What a response's headers say about the pace and quotas. */
+export interface RateHeaders {
+  /** Interval derived from X-Rate-Limit-* (Crossref). */
+  readonly advertisedMs: number | null;
+  readonly daily: ReportedQuota | null;
+  /** The rate window is spent: no request before this time. */
+  readonly rateResetAt: number | null;
+  /** Retry-After, or the time until the spent rate window resets. */
+  readonly retryAfterMs: number | null;
+}
+
+export function readRateHeaders(headers: Headers, now: number): RateHeaders {
+  const limits = parseRateLimit(headers.get("ratelimit"));
+  const daily = limits.get("daily");
+  const rate = limits.get("rate");
+  const windowWait = rate && rate.left === 0 ? rate.resetSeconds * 1000 : null;
+  return {
+    advertisedMs: advertisedInterval(headers),
+    daily: daily ? { left: daily.left, resetAt: now + daily.resetSeconds * 1000 } : null,
+    rateResetAt: windowWait === null ? null : now + windowWait,
+    retryAfterMs: parseRetryAfter(headers.get("retry-after"), now) ?? windowWait,
+  };
+}
+
+/** Whether a cached answer is still good: successful ones live longer than 404s. */
+export function isFresh(status: number, fetchedAt: string, now: number, ttl: { okTtlMs: number; notFoundTtlMs: number }): boolean {
+  return now - Date.parse(fetchedAt) <= (status === 200 ? ttl.okTtlMs : ttl.notFoundTtlMs);
+}
+
+export interface UsageInput {
+  readonly now: number;
+  readonly identified: boolean;
+  readonly hostLimits: Readonly<Record<string, HostLimit>>;
+  /** Calls per host (hosts without calls may be missing). */
+  readonly counts: readonly { readonly host: string; readonly calls: number; readonly lastHour: number }[];
+  readonly cooldowns: ReadonlyMap<string, number>;
+  /** Today's spending, for hosts with a daily quota. */
+  readonly spentToday: ReadonlyMap<string, number>;
+  readonly reported: ReadonlyMap<string, ReportedQuota>;
+}
+
+/** The usage summary: every known host, then any other host that was called. */
+export function usageSummary(u: UsageInput): MetadataUsageDto {
+  const counted = new Map(u.counts.map((c) => [c.host, c]));
+  const hosts = [...new Set([...Object.keys(u.hostLimits), ...counted.keys()])];
+  return {
+    now: u.now,
+    identified: u.identified,
+    services: hosts.map((host) => {
+      const limit = u.hostLimits[host];
+      const perSecond = (u.identified && limit?.identifiedPerSecond) || limit?.perSecond || null;
+      const until = u.cooldowns.get(host);
+      const dailyLimit = limit?.dailyLimit ?? null;
+      return {
+        host,
+        name: serviceName(host),
+        calls: counted.get(host)?.calls ?? 0,
+        lastHour: counted.get(host)?.lastHour ?? 0,
+        perSecond,
+        hourLimit: perSecond ? perSecond * 3600 : null,
+        coolingDownUntil: until ? new Date(until).toISOString() : null,
+        dailyLimit,
+        today: dailyLimit ? (u.spentToday.get(host) ?? 0) : 0,
+        reportedLeft: u.reported.get(host)?.left ?? null,
+        quotaResetsAt: dailyLimit ? new Date(utcDayStart(u.now) + DAY).toISOString() : null,
+      };
+    }),
+  };
+}
+
+// ---- call log ----------------------------------------------------------------------
+
+/** Where sent requests are counted: the database, or memory when there is none (tests). */
+interface CallLog {
+  record(host: string, at: number, cost: number): void;
+  prune(before: number): void;
+  counts(since: number, hourAgo: number): { host: string; calls: number; lastHour: number }[];
+  spent(host: string, from: number): number;
+}
+
+function dbCallLog(db: Database): CallLog {
+  return {
+    record: (host, at, cost) => httpCalls.record(db, host, at, cost),
+    prune: (before) => httpCalls.prune(db, before),
+    counts: (since, hourAgo) => httpCalls.counts(db, since, hourAgo),
+    spent: (host, from) => httpCalls.spent(db, host, from),
+  };
+}
+
+function memoryCallLog(): CallLog {
+  let calls: { host: string; at: number; cost: number }[] = [];
+  return {
+    record: (host, at, cost) => {
+      calls = [...calls, { host, at, cost }];
+    },
+    prune: (before) => {
+      calls = calls.filter((c) => c.at >= before);
+    },
+    counts: (since, hourAgo) =>
+      [...Map.groupBy(calls, (c) => c.host)].map(([host, list]) => ({
+        host,
+        calls: list.filter((c) => c.at >= since).length,
+        lastHour: list.filter((c) => c.at >= hourAgo).length,
+      })),
+    spent: (host, from) => calls.filter((c) => c.host === host && c.at >= from).reduce((n, c) => n + c.cost, 0),
+  };
+}
+
+// ---- the client --------------------------------------------------------------------
 
 /**
  * Polite HTTP client for metadata services: identifies itself, keeps each host under its
@@ -177,362 +333,280 @@ interface HostState {
  * that answers 429 until its cooldown is over, retries 5xx with backoff and caches successful
  * and 404 responses in SQLite. Interactive requests go ahead of background (bulk) ones.
  */
-export class HttpClient {
-  private readonly hosts = new Map<string, HostState>();
-  private readonly opts: Required<Omit<HttpClientOptions, "fetchImpl" | "sleep" | "now" | "hostLimits">>;
-  private readonly hostLimits: Record<string, HostLimit>;
-  private readonly fetchImpl: typeof fetch;
-  private readonly sleep: (ms: number) => Promise<void>;
-  private readonly now: () => number;
-  private readonly priority = new AsyncLocalStorage<Priority>();
-  /** Call records when there is no database (tests). */
-  private readonly memoryCalls: { host: string; at: number; cost: number }[] = [];
-  private lastPrune = 0;
-
-  constructor(
-    private readonly db: Database | null,
-    private readonly contactEmail: () => string | null,
-    options: HttpClientOptions = {},
-  ) {
-    this.opts = {
-      minIntervalMs: options.minIntervalMs ?? 1000,
-      timeoutMs: options.timeoutMs ?? 20_000,
-      okTtlMs: options.okTtlMs ?? 7 * DAY,
-      notFoundTtlMs: options.notFoundTtlMs ?? DAY,
-      retries: options.retries ?? 3,
-      maxWaitMs: options.maxWaitMs ?? 10_000,
-    };
-    this.hostLimits = { ...HOST_LIMITS, ...options.hostLimits };
-    this.fetchImpl = options.fetchImpl ?? fetch;
-    this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
-    this.now = options.now ?? Date.now;
-  }
-
-  userAgent(): string {
-    const email = this.contactEmail();
-    return `Bookshelf/0.1 (self-hosted book manager${email ? `; mailto:${email}` : ""})`;
-  }
-
-  get contact(): string | null {
-    return this.contactEmail();
-  }
-
+export interface HttpClient {
+  userAgent(): string;
+  /** The contact email the requests carry, if any. */
+  readonly contact: string | null;
   /** Run `fn` with its requests queued behind interactive ones (bulk lookups). */
-  background<T>(fn: () => Promise<T>): Promise<T> {
-    return this.priority.run("background", fn);
-  }
-
+  background<T>(fn: () => Promise<T>): Promise<T>;
   /** Hosts currently cooling down after a 429, with the time they accept requests again. */
-  cooldowns(): { host: string; until: number }[] {
-    const now = this.now();
-    return [...this.hosts].filter(([, s]) => s.blockedUntil > now).map(([host, s]) => ({ host, until: s.blockedUntil }));
-  }
-
+  cooldowns(): { host: string; until: number }[];
   /** GET returning text (JSON callers parse). Cached responses are returned without a request. */
-  async get(url: string, accept = "application/json", opts: RequestOptions = {}): Promise<HttpResponse> {
-    const key = `${accept} ${url}`;
-    const cached = this.readCache(key);
-    if (cached) return cached;
-
-    const res = await this.request(url, accept, opts);
-    const body = res.status === 200 || res.status === 404 ? await res.text() : "";
-    const out = { status: res.status, body };
-    if (res.status === 200 || res.status === 404) this.writeCache(key, out);
-    return out;
-  }
-
-  async getJson<T>(url: string, accept = "application/json", opts: RequestOptions = {}): Promise<T | null> {
-    const res = await this.get(url, accept, opts);
-    if (res.status === 404) return null;
-    if (res.status !== 200) throw new HttpError(`${new URL(url).host} answered ${res.status}`, res.status);
-    try {
-      return JSON.parse(res.body) as T;
-    } catch {
-      throw new HttpError(`${new URL(url).host} returned invalid JSON`, res.status);
-    }
-  }
-
+  get(url: string, accept?: string, opts?: RequestOptions): Promise<HttpResponse>;
+  getJson<T>(url: string, accept?: string, opts?: RequestOptions): Promise<T | null>;
   /** POST of a JSON body, returning text; never cached (callers can `prime` the cache with what they learn). */
-  async post(url: string, payload: unknown, opts: RequestOptions = {}): Promise<HttpResponse> {
-    const res = await this.request(url, "application/json", opts, JSON.stringify(payload));
-    return { status: res.status, body: await res.text() };
-  }
-
+  post(url: string, payload: unknown, opts?: RequestOptions): Promise<HttpResponse>;
   /** GET that always asks the service (account and quota details); not cached. */
-  async getFresh(url: string, opts: RequestOptions = {}): Promise<HttpResponse> {
-    const res = await this.request(url, "application/json", opts);
-    return { status: res.status, body: await res.text() };
-  }
-
+  getFresh(url: string, opts?: RequestOptions): Promise<HttpResponse>;
   /** Whether a GET of `url` would be answered from the cache. */
-  isCached(url: string, accept = "application/json"): boolean {
-    return this.readCache(`${accept} ${url}`) !== null;
-  }
-
+  isCached(url: string, accept?: string): boolean;
   /** Store a response for a GET of `url` learned another way (e.g. from a bulk call). */
-  prime(url: string, res: HttpResponse, accept = "application/json"): void {
-    this.writeCache(`${accept} ${url}`, res);
-  }
-
+  prime(url: string, res: HttpResponse, accept?: string): void;
   /** Calls left today under `host`'s daily quota (the lower of our count and the service's own report); null when it has none. */
-  quotaLeft(host: string): number | null {
-    const limit = this.hostLimits[host]?.dailyLimit;
-    const reported = this.reportedDaily(host);
-    const own = limit ? Math.max(0, limit - this.spentToday(host)) : null;
-    if (own === null) return reported?.left ?? null;
-    return reported ? Math.min(own, reported.left) : own;
-  }
-
+  quotaLeft(host: string): number | null;
   /** Binary GET (covers); not cached. Returns null for 404. */
-  async getBytes(url: string, maxBytes = 20 * 1024 * 1024): Promise<Uint8Array | null> {
-    const res = await this.request(url, "image/*", { cost: 0 });
-    if (res.status === 404) return null;
-    if (res.status !== 200) throw new HttpError(`${new URL(url).host} answered ${res.status}`, res.status);
-    const data = new Uint8Array(await res.arrayBuffer());
-    if (data.byteLength > maxBytes) throw new HttpError("Image too large", res.status);
-    return data;
-  }
+  getBytes(url: string, maxBytes?: number): Promise<Uint8Array | null>;
+  /**
+   * Requests sent per service since `since` and in the last hour, with each service's published
+   * limit (for the current identification) and any rate-limit cooldown.
+   */
+  usage(since: number): MetadataUsageDto;
+  /** Calls charged to `host` since 00:00 UTC (by our own count). */
+  spentToday(host: string): number;
+}
 
-  private async request(url: string, accept: string, opts: RequestOptions = {}, body?: string): Promise<Response> {
+/** `db` null: nothing is cached and calls are counted in memory (tests). */
+export function createHttpClient(db: Database | null, contactEmail: () => string | null, options: HttpClientOptions = {}): HttpClient {
+  const opts = {
+    minIntervalMs: options.minIntervalMs ?? 1000,
+    timeoutMs: options.timeoutMs ?? 20_000,
+    okTtlMs: options.okTtlMs ?? 7 * DAY,
+    notFoundTtlMs: options.notFoundTtlMs ?? DAY,
+    retries: options.retries ?? 3,
+    maxWaitMs: options.maxWaitMs ?? 10_000,
+  };
+  const hostLimits: Record<string, HostLimit> = { ...HOST_LIMITS, ...options.hostLimits };
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms));
+  const now = options.now ?? Date.now;
+  const priority = new AsyncLocalStorage<Priority>();
+  const calls = db ? dbCallLog(db) : memoryCallLog();
+  const hosts = new Map<string, HostState>();
+  let lastPrune = 0;
+
+  const userAgent = () => {
+    const email = contactEmail();
+    return `Bookshelf/0.1 (self-hosted book manager${email ? `; mailto:${email}` : ""})`;
+  };
+
+  const state = (host: string): HostState => {
+    const existing = hosts.get(host);
+    if (existing) return existing;
+    const fresh: HostState = { busy: false, waiters: [], nextStart: 0, blockedUntil: 0, strikes: 0, advertisedMs: 0, reportedDaily: null };
+    hosts.set(host, fresh);
+    return fresh;
+  };
+
+  const interval = (host: string, s: HostState) => paceInterval(hostLimits[host], opts.minIntervalMs, !!contactEmail(), s.advertisedMs);
+
+  const spentToday = (host: string) => calls.spent(host, utcDayStart(now()));
+
+  /** The service's own report of its daily quota, while it still applies. */
+  const reportedDaily = (host: string): ReportedQuota | null => {
+    const r = hosts.get(host)?.reportedDaily;
+    return r && r.resetAt > now() ? r : null;
+  };
+
+  const cooldowns = () => {
+    const t = now();
+    return [...hosts].filter(([, s]) => s.blockedUntil > t).map(([host, s]) => ({ host, until: s.blockedUntil }));
+  };
+
+  /** Fails, without sending anything, when `cost` more calls would go past `host`'s daily quota. */
+  const checkQuota = (host: string, cost: number) => {
+    const limit = hostLimits[host]?.dailyLimit;
+    const resetAt = quotaBlockedUntil(cost, limit, limit ? spentToday(host) : 0, reportedDaily(host), now());
+    if (resetAt !== null) throw new QuotaExceededError(host, resetAt);
+  };
+
+  const recordCall = (host: string, at: number, cost: number) => {
+    calls.record(host, at, cost);
+    if (at - lastPrune > MINUTE) {
+      lastPrune = at;
+      calls.prune(at - CALL_RETENTION_MS);
+    }
+  };
+
+  /**
+   * Wait for this host's turn: no other request in flight, the pace interval elapsed and no
+   * cooldown. A cooldown longer than `maxWaitMs` fails instead of waiting. Returns the release.
+   */
+  const acquire = async (host: string): Promise<() => void> => {
+    const s = state(host);
+    const prio = priority.getStore() ?? "interactive";
+    if (s.busy || s.waiters.length) {
+      await new Promise<void>((wake) => s.waiters.splice(queuePosition(s.waiters, prio), 0, { priority: prio, wake }));
+    }
+    s.busy = true; // held from here (the previous holder handed the slot over)
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      const next = s.waiters.shift();
+      if (next) next.wake();
+      else s.busy = false;
+    };
+    // Holding the slot, nothing else can move nextStart/blockedUntil: one wait is enough.
+    const t = now();
+    if (s.blockedUntil > t + opts.maxWaitMs) {
+      release();
+      throw new RateLimitedError(host, s.blockedUntil, t);
+    }
+    const wait = Math.max(s.nextStart, s.blockedUntil) - t;
+    if (wait > 0) await sleep(wait);
+    s.nextStart = now() + interval(host, s);
+    return release;
+  };
+
+  const request = async (url: string, accept: string, ropts: RequestOptions = {}, body?: string): Promise<Response> => {
     const host = new URL(url).host;
-    const cost = opts.cost ?? 1;
+    const cost = ropts.cost ?? 1;
     let lastError: unknown = null;
-    for (let attempt = 0; attempt <= this.opts.retries; attempt++) {
-      const release = await this.acquire(host);
+    for (let attempt = 0; attempt <= opts.retries; attempt++) {
+      const release = await acquire(host);
       try {
-        this.checkQuota(host, cost);
+        checkQuota(host, cost);
       } catch (err) {
         release();
         throw err;
       }
-      const startedAt = this.now();
-      this.recordCall(host, startedAt, cost);
+      const startedAt = now();
+      recordCall(host, startedAt, cost);
       let res: Response;
       try {
-        res = await this.fetchImpl(url, {
+        res = await fetchImpl(url, {
           method: body === undefined ? "GET" : "POST",
           headers: {
-            "User-Agent": this.userAgent(),
+            "User-Agent": userAgent(),
             Accept: accept,
             ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-            ...opts.headers,
+            ...ropts.headers,
           },
           body,
           redirect: "follow",
-          signal: AbortSignal.timeout(this.opts.timeoutMs),
+          signal: AbortSignal.timeout(opts.timeoutMs),
         });
       } catch (err) {
         release();
         lastError = err;
-        if (attempt < this.opts.retries) await this.sleep(1000 * 2 ** attempt);
+        if (attempt < opts.retries) await sleep(1000 * 2 ** attempt);
         continue;
       }
-      const state = this.state(host);
-      const advertised = advertisedInterval(res.headers);
-      if (advertised) {
+      const s = state(host);
+      const rate = readRateHeaders(res.headers, now());
+      if (rate.advertisedMs) {
         // Applies to the very next request, whose start time was set before these headers arrived.
-        state.advertisedMs = advertised;
-        state.nextStart = Math.max(state.nextStart, startedAt + this.interval(host, state));
+        s.advertisedMs = rate.advertisedMs;
+        s.nextStart = Math.max(s.nextStart, startedAt + interval(host, s));
       }
-      const limits = parseRateLimit(res.headers.get("ratelimit"));
-      const daily = limits.get("daily");
-      if (daily) state.reportedDaily = { left: daily.left, resetAt: this.now() + daily.resetSeconds * 1000 };
-      const rate = limits.get("rate");
-      // The window is spent: the next request waits for it to reset.
-      if (rate && rate.left === 0) state.nextStart = Math.max(state.nextStart, this.now() + rate.resetSeconds * 1000);
-      const retryAfter = parseRetryAfter(res.headers.get("retry-after"), this.now()) ?? (rate && rate.left === 0 ? rate.resetSeconds * 1000 : null);
+      if (rate.daily) s.reportedDaily = rate.daily;
+      if (rate.rateResetAt !== null) s.nextStart = Math.max(s.nextStart, rate.rateResetAt);
 
-      if (res.status === 429 && daily && daily.left === 0) {
+      if (res.status === 429 && rate.daily?.left === 0) {
         // The day's quota, not the pace: no cooldown and no retry, the caller falls back to other services.
         await res.body?.cancel();
         release();
-        throw new QuotaExceededError(host, state.reportedDaily!.resetAt);
+        throw new QuotaExceededError(host, rate.daily.resetAt);
       }
-      if (res.status === 429 || (res.status === 503 && retryAfter !== null)) {
+      if (res.status === 429 || (res.status === 503 && rate.retryAfterMs !== null)) {
         // Rate limited: every request to this host waits out the cooldown (the next attempt
         // waits for it if it is short, otherwise fails with RateLimitedError).
         await res.body?.cancel();
-        state.strikes++;
-        const cooldown = retryAfter !== null
-          ? Math.min(retryAfter, MAX_RETRY_AFTER_MS)
-          : Math.min(BASE_COOLDOWN_MS * 2 ** (state.strikes - 1), MAX_COOLDOWN_MS);
-        state.blockedUntil = Math.max(state.blockedUntil, this.now() + cooldown);
+        s.strikes++;
+        s.blockedUntil = Math.max(s.blockedUntil, now() + cooldownMs(rate.retryAfterMs, s.strikes));
         release();
-        lastError = new RateLimitedError(host, state.blockedUntil, this.now());
+        lastError = new RateLimitedError(host, s.blockedUntil, now());
         continue;
       }
       release();
       if (res.status >= 500) {
         lastError = new HttpError(`${host} answered ${res.status}`, res.status);
         await res.body?.cancel();
-        if (attempt < this.opts.retries) await this.sleep(1000 * 2 ** attempt);
+        if (attempt < opts.retries) await sleep(1000 * 2 ** attempt);
         continue;
       }
-      state.strikes = 0;
+      s.strikes = 0;
       return res;
     }
     if (lastError instanceof HttpError) throw lastError;
     throw new HttpError(`Could not reach ${host}: ${lastError instanceof Error ? lastError.message : String(lastError)}`, null);
-  }
+  };
 
-  /**
-   * Requests sent per service since `since` and in the last hour, with each service's published
-   * limit (for the current identification) and any rate-limit cooldown.
-   */
-  usage(since: number): MetadataUsageDto {
-    const now = this.now();
-    const hourAgo = now - HOUR;
-    const dayStart = utcDayStart(now);
-    const counts = new Map<string, { calls: number; lastHour: number }>();
-    for (const host of Object.keys(this.hostLimits)) counts.set(host, { calls: 0, lastHour: 0 });
-    const rows = this.db
-      ? (this.db
-          .query("SELECT host, SUM(at >= ?) AS calls, SUM(at >= ?) AS lastHour FROM http_calls WHERE at >= ? GROUP BY host")
-          .all(since, hourAgo, Math.min(since, hourAgo)) as { host: string; calls: number; lastHour: number }[])
-      : [...Map.groupBy(this.memoryCalls, (c) => c.host)].map(([host, list]) => ({
-          host,
-          calls: list.filter((c) => c.at >= since).length,
-          lastHour: list.filter((c) => c.at >= hourAgo).length,
-        }));
-    for (const r of rows) counts.set(r.host, { calls: r.calls ?? 0, lastHour: r.lastHour ?? 0 });
+  const readCache = (key: string): HttpResponse | null => {
+    const row = db ? httpCache.get(db, key) : null;
+    return row && isFresh(row.status, row.fetchedAt, now(), opts) ? { status: row.status, body: row.body } : null;
+  };
 
-    const identified = !!this.contactEmail();
-    const cooldowns = new Map(this.cooldowns().map((c) => [c.host, c.until]));
-    return {
-      now,
-      identified,
-      services: [...counts].map(([host, c]) => {
-        const limit = this.hostLimits[host];
-        const perSecond = (identified && limit?.identifiedPerSecond) || limit?.perSecond || null;
-        const until = cooldowns.get(host);
-        const dailyLimit = limit?.dailyLimit ?? null;
-        const reported = this.reportedDaily(host);
-        return {
-          host,
-          name: serviceName(host),
-          calls: c.calls,
-          lastHour: c.lastHour,
-          perSecond,
-          hourLimit: perSecond ? perSecond * 3600 : null,
-          coolingDownUntil: until ? new Date(until).toISOString() : null,
-          dailyLimit,
-          today: dailyLimit ? this.spentToday(host) : 0,
-          reportedLeft: reported?.left ?? null,
-          quotaResetsAt: dailyLimit ? new Date(dayStart + DAY).toISOString() : null,
-        };
-      }),
-    };
-  }
+  const writeCache = (key: string, res: HttpResponse) => {
+    if (db) httpCache.put(db, key, { ...res, fetchedAt: new Date(now()).toISOString() });
+  };
 
-  /** Calls charged to `host` since 00:00 UTC (by our own count). */
-  spentToday(host: string): number {
-    const from = utcDayStart(this.now());
-    if (!this.db) return this.memoryCalls.filter((c) => c.host === host && c.at >= from).reduce((n, c) => n + c.cost, 0);
-    const row = this.db.query("SELECT COALESCE(SUM(cost), 0) AS n FROM http_calls WHERE host = ? AND at >= ?").get(host, from) as { n: number };
-    return row.n;
-  }
+  const get = async (url: string, accept = "application/json", ropts: RequestOptions = {}): Promise<HttpResponse> => {
+    const key = `${accept} ${url}`;
+    const cached = readCache(key);
+    if (cached) return cached;
+    const res = await request(url, accept, ropts);
+    const cacheable = res.status === 200 || res.status === 404;
+    const out = { status: res.status, body: cacheable ? await res.text() : "" };
+    if (cacheable) writeCache(key, out);
+    return out;
+  };
 
-  /** The service's own report of its daily quota, while it still applies. */
-  private reportedDaily(host: string): { left: number; resetAt: number } | null {
-    const r = this.hosts.get(host)?.reportedDaily;
-    return r && r.resetAt > this.now() ? r : null;
-  }
-
-  /** Fails, without sending anything, when `cost` more calls would go past `host`'s daily quota. */
-  private checkQuota(host: string, cost: number): void {
-    if (cost <= 0) return;
-    const limit = this.hostLimits[host]?.dailyLimit;
-    if (limit && this.spentToday(host) + cost > limit) throw new QuotaExceededError(host, utcDayStart(this.now()) + DAY);
-    const reported = this.reportedDaily(host);
-    if (reported && reported.left < cost) throw new QuotaExceededError(host, reported.resetAt);
-  }
-
-  private recordCall(host: string, at: number, cost = 1): void {
-    const cutoff = at - CALL_RETENTION_MS;
-    const prune = at - this.lastPrune > MINUTE;
-    if (prune) this.lastPrune = at;
-    if (!this.db) {
-      this.memoryCalls.push({ host, at, cost });
-      if (prune) {
-        const keepFrom = this.memoryCalls.findIndex((c) => c.at >= cutoff);
-        this.memoryCalls.splice(0, keepFrom === -1 ? this.memoryCalls.length : keepFrom);
+  return {
+    userAgent,
+    get contact() {
+      return contactEmail();
+    },
+    background: (fn) => priority.run("background", fn),
+    cooldowns,
+    get,
+    async getJson<T>(url: string, accept = "application/json", ropts: RequestOptions = {}): Promise<T | null> {
+      const res = await get(url, accept, ropts);
+      if (res.status === 404) return null;
+      if (res.status !== 200) throw new HttpError(`${new URL(url).host} answered ${res.status}`, res.status);
+      try {
+        return JSON.parse(res.body) as T;
+      } catch {
+        throw new HttpError(`${new URL(url).host} returned invalid JSON`, res.status);
       }
-      return;
-    }
-    this.db.query("INSERT INTO http_calls (host, at, cost) VALUES (?, ?, ?)").run(host, at, cost);
-    if (prune) this.db.query("DELETE FROM http_calls WHERE at < ?").run(cutoff);
-  }
-
-  private state(host: string): HostState {
-    let s = this.hosts.get(host);
-    if (!s) this.hosts.set(host, (s = { busy: false, waiters: [], nextStart: 0, blockedUntil: 0, strikes: 0, advertisedMs: 0, reportedDaily: null }));
-    return s;
-  }
-
-  private interval(host: string, state: HostState): number {
-    const limit = this.hostLimits[host];
-    const base = !limit
-      ? this.opts.minIntervalMs
-      : this.contactEmail() && limit.identifiedIntervalMs
-        ? limit.identifiedIntervalMs
-        : limit.intervalMs;
-    return Math.max(base, state.advertisedMs);
-  }
-
-  /**
-   * Wait for this host's turn: no other request in flight, the pace interval elapsed and no
-   * cooldown. A cooldown longer than `maxWaitMs` fails instead of waiting. Returns the release.
-   */
-  private async acquire(host: string): Promise<() => void> {
-    const state = this.state(host);
-    const priority = this.priority.getStore() ?? "interactive";
-    if (state.busy || state.waiters.length) {
-      await new Promise<void>((wake) => {
-        const entry = { priority, wake };
-        // Interactive requests go before queued background ones.
-        const i = priority === "interactive" ? state.waiters.findIndex((w) => w.priority === "background") : -1;
-        if (i < 0) state.waiters.push(entry);
-        else state.waiters.splice(i, 0, entry);
+    },
+    async post(url, payload, ropts = {}) {
+      const res = await request(url, "application/json", ropts, JSON.stringify(payload));
+      return { status: res.status, body: await res.text() };
+    },
+    async getFresh(url, ropts = {}) {
+      const res = await request(url, "application/json", ropts);
+      return { status: res.status, body: await res.text() };
+    },
+    isCached: (url, accept = "application/json") => readCache(`${accept} ${url}`) !== null,
+    prime: (url, res, accept = "application/json") => writeCache(`${accept} ${url}`, res),
+    quotaLeft: (host) => quotaRemaining(hostLimits[host]?.dailyLimit, spentToday(host), reportedDaily(host)),
+    async getBytes(url, maxBytes = 20 * 1024 * 1024) {
+      const res = await request(url, "image/*", { cost: 0 });
+      if (res.status === 404) return null;
+      if (res.status !== 200) throw new HttpError(`${new URL(url).host} answered ${res.status}`, res.status);
+      const data = new Uint8Array(await res.arrayBuffer());
+      if (data.byteLength > maxBytes) throw new HttpError("Image too large", res.status);
+      return data;
+    },
+    usage(since) {
+      const t = now();
+      const quotaHosts = Object.keys(hostLimits).filter((h) => hostLimits[h]!.dailyLimit);
+      return usageSummary({
+        now: t,
+        identified: !!contactEmail(),
+        hostLimits,
+        counts: calls.counts(since, t - HOUR),
+        cooldowns: new Map(cooldowns().map((c) => [c.host, c.until])),
+        spentToday: new Map(quotaHosts.map((h) => [h, spentToday(h)])),
+        reported: new Map(
+          [...hosts.keys()].flatMap((h) => {
+            const r = reportedDaily(h);
+            return r ? [[h, r] as const] : [];
+          }),
+        ),
       });
-    }
-    state.busy = true; // held from here (the previous holder handed the slot over)
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      const next = state.waiters.shift();
-      if (next) next.wake();
-      else state.busy = false;
-    };
-    // Holding the slot, nothing else can move nextStart/blockedUntil: one wait is enough.
-    const now = this.now();
-    if (state.blockedUntil > now + this.opts.maxWaitMs) {
-      release();
-      throw new RateLimitedError(host, state.blockedUntil, now);
-    }
-    const wait = Math.max(state.nextStart, state.blockedUntil) - now;
-    if (wait > 0) await this.sleep(wait);
-    state.nextStart = this.now() + this.interval(host, state);
-    return release;
-  }
-
-  private readCache(key: string): HttpResponse | null {
-    if (!this.db) return null;
-    const row = this.db.query("SELECT status, body, fetched_at FROM http_cache WHERE url = ?").get(key) as
-      | { status: number; body: string; fetched_at: string }
-      | null;
-    if (!row) return null;
-    const ttl = row.status === 200 ? this.opts.okTtlMs : this.opts.notFoundTtlMs;
-    if (Date.now() - Date.parse(row.fetched_at) > ttl) return null;
-    return { status: row.status, body: row.body };
-  }
-
-  private writeCache(key: string, res: HttpResponse): void {
-    this.db
-      ?.query(
-        `INSERT INTO http_cache (url, status, body, fetched_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(url) DO UPDATE SET status = excluded.status, body = excluded.body, fetched_at = excluded.fetched_at`,
-      )
-      .run(key, res.status, res.body, new Date().toISOString());
-  }
+    },
+    spentToday,
+  };
 }

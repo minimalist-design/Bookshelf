@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiRoutes } from "../src/server/api/router.ts";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
-import { HttpClient, ISBNDB_HOST, ISBNDB_IMAGES_HOST, isbndbLimit, parseRateLimit, QuotaExceededError } from "../src/server/sources/http.ts";
+import { createHttpClient, ISBNDB_HOST, ISBNDB_IMAGES_HOST, isbndbLimit, parseRateLimit, QuotaExceededError } from "../src/server/sources/http.ts";
 import { isbndbCandidate, isbndbKeptSearch } from "../src/server/sources/isbndb.ts";
 import type { IsbndbRecord } from "../src/server/db/repo/isbndbRecords.ts";
-import { makeJpeg } from "./fixtures.ts";
+import { closeTestApp, makeJpeg, scratchDir, testApp } from "./fixtures.ts";
+import * as bookRepo from "../src/server/db/repo/books.ts";
+import * as isbndbRecords from "../src/server/db/repo/isbndbRecords.ts";
+import * as lookups from "../src/server/services/lookup/lookup.ts";
+import * as maintenance from "../src/server/services/maintenance.ts";
 
 const KEY = "test-isbndb-key";
 
@@ -154,7 +157,7 @@ describe("ISBNdb quota in the HTTP client", () => {
 
   test("bulk calls cost one per ISBN; past the daily limit nothing is sent", async () => {
     const net = fakeIsbndb();
-    const http = new HttpClient(null, () => null, { fetchImpl: net.fetchImpl, sleep: async () => {}, hostLimits: limits });
+    const http = createHttpClient(null, () => null, { fetchImpl: net.fetchImpl, sleep: async () => {}, hostLimits: limits });
     await http.post(`https://${ISBNDB_HOST}/books`, { isbns: ["a", "b", "c", "d"] }, { cost: 4 });
     expect(http.spentToday(ISBNDB_HOST)).toBe(4);
     expect(http.quotaLeft(ISBNDB_HOST)).toBe(1);
@@ -170,7 +173,7 @@ describe("ISBNdb quota in the HTTP client", () => {
   test("what ISBNdb reports as left counts too (calls made elsewhere with the key)", async () => {
     let left = 1;
     const net = fakeIsbndb({ daily: () => left });
-    const http = new HttpClient(null, () => null, { fetchImpl: net.fetchImpl, sleep: async () => {}, hostLimits: isbndbLimit({ perSecond: 1, dailyLimit: 5000 }) });
+    const http = createHttpClient(null, () => null, { fetchImpl: net.fetchImpl, sleep: async () => {}, hostLimits: isbndbLimit({ perSecond: 1, dailyLimit: 5000 }) });
     await http.getJson(url("9780441172719"));
     expect(http.quotaLeft(ISBNDB_HOST)).toBe(1);
     left = 0;
@@ -186,7 +189,14 @@ describe("ISBNdb quota in the HTTP client", () => {
       ++n === 1
         ? new Response("{}", { headers: { ratelimit: '"rate";r=0;t=7, "daily";r=10;t=100' } })
         : new Response('{"message":"Daily quota exceeded, please try again later"}', { status: 429, headers: { ratelimit: '"rate";r=50;t=0, "daily";r=0;t=100' } })) as unknown as typeof fetch;
-    const http = new HttpClient(null, () => null, { fetchImpl, sleep: async (ms) => void waits.push(ms), hostLimits: isbndbLimit({ perSecond: 1, dailyLimit: 5000 }) });
+    // A fixed clock: with the real one a millisecond may pass between the answer and the next wait.
+    const at = Date.UTC(2026, 10, 20, 12);
+    const http = createHttpClient(null, () => null, {
+      fetchImpl,
+      sleep: async (ms) => void waits.push(ms),
+      now: () => at,
+      hostLimits: isbndbLimit({ perSecond: 1, dailyLimit: 5000 }),
+    });
     await http.get(url("1"));
     await expect(http.get(url("2"))).rejects.toBeInstanceOf(QuotaExceededError);
     expect(n).toBe(2); // not retried
@@ -203,25 +213,12 @@ describe("lookups with ISBNdb", () => {
 
   const start = (dailyLimit = 5000) => {
     net = fakeIsbndb();
-    app = createApp(loadConfig({ data_dir: join(tmp, "data"), isbndb_daily_limit: dailyLimit }, { ISBNDB_API_KEY: KEY }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
-      http: { fetchImpl: net.fetchImpl, sleep: async () => {} },
-    });
+    app = testApp(tmp, { isbndb_daily_limit: dailyLimit }, { http: { fetchImpl: net.fetchImpl, sleep: async () => {} } }, { ISBNDB_API_KEY: KEY });
   };
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), "bookshelf-isbndb-"));
-    root = join(tmp, "library");
-    mkdirSync(join(root, "S"), { recursive: true });
+    ({ tmp, root } = scratchDir("isbndb", ["S"]));
   });
-  afterEach(async () => {
-    app.lookup.stop();
-    await app.lookup.idle();
-    app.isbndbCovers.stop();
-    await app.isbndbCovers.idle();
-    await app.library.close();
-    app.db.close();
-    rmSync(tmp, { recursive: true, force: true });
-  });
+  afterEach(() => closeTestApp(app, tmp));
 
   const put = (rel: string) => writeFileSync(join(root, rel), rel);
   const idOf = (rel: string) => app.library.index.get(rel)!.bookId;
@@ -233,8 +230,8 @@ describe("lookups with ISBNdb", () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     put("S/Dune Messiah -- Frank Herbert.epub");
     await app.library.open(root);
-    const byIsbn = await app.lookup.lookup(idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"));
-    const byTitle = await app.lookup.lookup(idOf("S/Dune Messiah -- Frank Herbert.epub"), { q: "Dune Messiah" });
+    const byIsbn = await lookups.find(app, idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"));
+    const byTitle = await lookups.find(app, idOf("S/Dune Messiah -- Frank Herbert.epub"), { q: "Dune Messiah" });
     expect([...byIsbn.errors, ...byTitle.errors]).toEqual([]);
     expect(net.isbndbCalls()).toEqual([]);
     expect(net.calls.some((c) => c.url.includes("openlibrary.org/api/books"))).toBe(true);
@@ -247,13 +244,13 @@ describe("lookups with ISBNdb", () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    const r = await app.lookup.lookup(id, ISBNDB);
+    const r = await lookups.find(app, id, ISBNDB);
     expect(r.errors).toEqual([]);
     expect(r.candidates.map((c) => c.source)).toEqual(["isbndb"]);
     expect(net.calls.some((c) => c.url.includes("openlibrary.org"))).toBe(false); // ISBNdb only
     expect(net.isbndbCalls()[0]!.headers.authorization).toBe(KEY);
 
-    const applied = await app.lookup.apply(id, { candidate: r.candidates[0]!, fields: ["publisher", "pages"], cover: false });
+    const applied = await lookups.apply(app, id, { candidate: r.candidates[0]!, fields: ["publisher", "pages"], cover: false });
     expect(applied.book).toMatchObject({ publisher: "Ace", pages: 535, confirmedSource: "isbndb" });
 
     // The search form picks it over HTTP the same way.
@@ -273,11 +270,11 @@ describe("lookups with ISBNdb", () => {
     put("S/Unknown Book -- Someone -- isbn13 9780000000002.epub");
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
-    const unknown = await app.lookup.lookup(idOf("S/Unknown Book -- Someone -- isbn13 9780000000002.epub"), ISBNDB);
+    const unknown = await lookups.find(app, idOf("S/Unknown Book -- Someone -- isbn13 9780000000002.epub"), ISBNDB);
     expect(unknown.errors).toEqual([]);
     // Its ISBN and then its title were asked: the day's two calls are spent.
     expect(net.isbndbCalls()).toHaveLength(2);
-    const dune = await app.lookup.lookup(idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"), ISBNDB);
+    const dune = await lookups.find(app, idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"), ISBNDB);
     expect(dune.errors.join()).toContain("ISBNdb's daily limit is used up");
     expect(net.isbndbCalls()).toHaveLength(2);
   });
@@ -287,7 +284,7 @@ describe("lookups with ISBNdb", () => {
     put("S/Dune -- Frank Herbert.epub");
     put("S/Dune Messiah -- Frank Herbert -- isbn13 9780593098233.epub");
     await app.library.open(root);
-    const r = await app.lookup.lookup(idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
+    const r = await lookups.find(app, idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
     expect(r.candidates[0]).toMatchObject({ source: "isbndb", match: "search" });
     const search = net.isbndbCalls().find((c) => c.url.includes("/books/"))!;
     expect(search.url).toContain("/books/Dune?");
@@ -295,11 +292,11 @@ describe("lookups with ISBNdb", () => {
     expect(search.url).toContain("pageSize=100"); // a search costs one call however many it returns
 
     // Both results are kept as ISBNdb sent them, every field included.
-    expect(app.isbndbRecords.count()).toBe(2);
-    expect(app.isbndbRecords.get("9780441172719")).toEqual(DUNE);
+    expect(isbndbRecords.count(app.db)).toBe(2);
+    expect(isbndbRecords.get(app.db, "9780441172719")).toEqual(DUNE);
     // Dune Messiah came with that search: an automatic lookup finds it in the kept records.
     const before = net.isbndbCalls().length;
-    const messiah = await app.lookup.lookup(idOf("S/Dune Messiah -- Frank Herbert -- isbn13 9780593098233.epub"));
+    const messiah = await lookups.find(app, idOf("S/Dune Messiah -- Frank Herbert -- isbn13 9780593098233.epub"));
     expect(messiah.candidates[0]).toMatchObject({ source: "isbndb", match: "isbn", id: "9780593098233", kept: true });
     expect(net.isbndbCalls()).toHaveLength(before);
   });
@@ -309,18 +306,18 @@ describe("lookups with ISBNdb", () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    await app.lookup.lookup(id, ISBNDB);
+    await lookups.find(app, id, ISBNDB);
     expect(net.isbndbCalls()).toHaveLength(1);
-    app.maintenance.clearHttpCache();
-    expect(app.maintenance.stats().isbndbRecords).toBe(1);
-    const again = await app.lookup.lookup(id);
+    maintenance.clearHttpCache(app);
+    expect(maintenance.stats(app).isbndbRecords).toBe(1);
+    const again = await lookups.find(app, id);
     expect(again.candidates[0]).toMatchObject({ source: "isbndb", kept: true });
     expect(net.isbndbCalls()).toHaveLength(1);
   });
 
   test("bulk lookups never call ISBNdb; kept records answer, Open Library the rest", async () => {
     start();
-    app.isbndbRecords.putMany([DUNE], "book", () => DUNE.isbn13);
+    app.isbndbStore.putMany([DUNE], "book", () => DUNE.isbn13);
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     put("S/The Hobbit -- J. R. R. Tolkien -- isbn13 9780547928227.epub");
     put("S/Unknown Book -- Someone -- isbn13 9780000000002.epub");
@@ -331,7 +328,7 @@ describe("lookups with ISBNdb", () => {
     expect(net.isbndbCalls()).toEqual([]);
     expect(app.http.spentToday(ISBNDB_HOST)).toBe(0);
     expect(app.lookup.status()).toMatchObject({ done: 3, failed: 0 });
-    expect(app.lookup.reviewQueue().map((i) => i.result.candidates[0]).filter((c) => c?.source === "isbndb")).toMatchObject([{ id: DUNE.isbn13, kept: true }]);
+    expect(lookups.reviewItems(app).map((i) => i.result.candidates[0]).filter((c) => c?.source === "isbndb")).toMatchObject([{ id: DUNE.isbn13, kept: true }]);
     expect(net.calls.filter((c) => c.url.includes("openlibrary.org/api/books")).length).toBeGreaterThanOrEqual(2);
   });
 
@@ -344,24 +341,24 @@ describe("lookups with ISBNdb", () => {
     const search = () => net.isbndbCalls().filter((c) => c.url.includes("/books/"));
 
     // Picked by name: ISBNdb is searched, and both Dune books come back and are kept.
-    const dune = await app.lookup.lookup(idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
+    const dune = await lookups.find(app, idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
     expect(dune.candidates.map((c) => c.metadata.title)).toEqual(["Dune", "Dune Messiah"]);
     expect(dune.candidates[0]!.kept).toBeUndefined();
     expect(search()).toHaveLength(1);
 
     // Dune Messiah came with that search: found in the kept records, no call.
-    const messiah = await app.lookup.lookup(idOf("S/Dune Messiah -- Frank Herbert.epub"));
+    const messiah = await lookups.find(app, idOf("S/Dune Messiah -- Frank Herbert.epub"));
     expect(messiah.candidates[0]).toMatchObject({ kept: true, metadata: { title: "Dune Messiah" } });
     expect(search()).toHaveLength(1);
 
     // Kept records mention Dune, but none is "Children of Dune": still no call unless asked for.
-    await app.lookup.lookup(idOf("S/Children of Dune -- Frank Herbert.epub"));
+    await lookups.find(app, idOf("S/Children of Dune -- Frank Herbert.epub"));
     expect(search()).toHaveLength(1);
-    await app.lookup.lookup(idOf("S/Children of Dune -- Frank Herbert.epub"), ISBNDB);
+    await lookups.find(app, idOf("S/Children of Dune -- Frank Herbert.epub"), ISBNDB);
     expect(search()).toHaveLength(2);
 
     // Picking ISBNdb by name always asks it, even when a kept record is surely the book.
-    await app.lookup.lookup(idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
+    await lookups.find(app, idOf("S/Dune -- Frank Herbert.epub"), ISBNDB);
     expect(search()).toHaveLength(3);
   });
 
@@ -371,7 +368,7 @@ describe("lookups with ISBNdb", () => {
     put("S/The Hobbit -- J. R. R. Tolkien -- isbn13 9780547928227.epub");
     put("S/Dune Messiah -- Frank Herbert -- isbn13 9780593098233.epub");
     await app.library.open(root);
-    for (const id of app.library.index.bookIds()) await app.lookup.lookup(id, ISBNDB);
+    for (const id of app.library.index.bookIds()) await lookups.find(app, id, ISBNDB);
     await app.isbndbCovers.idle();
 
     const images = net.calls.filter((c) => c.url.includes(ISBNDB_IMAGES_HOST)).map((c) => c.url);
@@ -379,37 +376,37 @@ describe("lookups with ISBNdb", () => {
     const dir = join(tmp, "data", "isbndb-covers");
     expect(readFileSync(join(dir, "9780441172719.jpg"))).toEqual(Buffer.from(JPEG));
     expect(existsSync(join(dir, "9780547928227.jpg"))).toBe(true);
-    expect(app.isbndbRecords.coverStats()).toEqual({ files: 2, bytes: 2 * JPEG.byteLength, pending: 0 }); // Messiah has no image
-    expect(app.maintenance.stats()).toMatchObject({ isbndbRecords: 3, isbndbCovers: 2 });
+    expect(isbndbRecords.coverStats(app.db)).toEqual({ files: 2, bytes: 2 * JPEG.byteLength, pending: 0 }); // Messiah has no image
+    expect(maintenance.stats(app)).toMatchObject({ isbndbRecords: 3, isbndbCovers: 2 });
 
     // Applying an ISBNdb cover takes the kept file: nothing is downloaded again.
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    const r = await app.lookup.lookup(id);
-    await app.lookup.apply(id, { candidate: r.candidates[0]!, fields: [], cover: true });
-    expect(app.books.get(id)).toMatchObject({ hasCover: true, coverSource: "isbndb" });
+    const r = await lookups.find(app, id);
+    await lookups.apply(app, id, { candidate: r.candidates[0]!, fields: [], cover: true });
+    expect(bookRepo.get(app.db, id)).toMatchObject({ hasCover: true, coverSource: "isbndb" });
     expect(net.calls.filter((c) => c.url.includes(ISBNDB_IMAGES_HOST))).toHaveLength(2);
   });
 
   test("an expired full-size link falls back to the 450 px image", async () => {
     start();
-    app.isbndbRecords.putMany([{ ...DUNE, image_original: "https://images.isbndb.com/covers/original/x.jpg?expired=1" }], "book", () => DUNE.isbn13);
+    app.isbndbStore.putMany([{ ...DUNE, image_original: "https://images.isbndb.com/covers/original/x.jpg?expired=1" }], "book", () => DUNE.isbn13);
     await app.isbndbCovers.idle();
     expect(net.calls.filter((c) => c.url.includes(ISBNDB_IMAGES_HOST)).map((c) => c.url)).toEqual([
       "https://images.isbndb.com/covers/original/x.jpg?expired=1",
       DUNE.image,
     ]);
-    expect(app.isbndbRecords.coverFile(DUNE.isbn13)).toBe("9780441172719.jpg");
+    expect(isbndbRecords.coverFile(app.db, DUNE.isbn13)).toBe("9780441172719.jpg");
   });
 
   test("kept records answer even without a key", async () => {
     net = fakeIsbndb();
     app = createApp(loadConfig({ data_dir: join(tmp, "data") }, {}), { http: { fetchImpl: net.fetchImpl, sleep: async () => {} } });
-    app.isbndbRecords.putMany([DUNE], "search", () => DUNE.isbn13);
+    app.isbndbStore.putMany([DUNE], "search", () => DUNE.isbn13);
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     put("S/Dune -- Frank Herbert.epub");
     await app.library.open(root);
-    expect((await app.lookup.lookup(idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"))).candidates[0]).toMatchObject({ source: "isbndb", kept: true });
-    expect((await app.lookup.lookup(idOf("S/Dune -- Frank Herbert.epub"))).candidates[0]).toMatchObject({ source: "isbndb", kept: true });
+    expect((await lookups.find(app, idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub"))).candidates[0]).toMatchObject({ source: "isbndb", kept: true });
+    expect((await lookups.find(app, idOf("S/Dune -- Frank Herbert.epub"))).candidates[0]).toMatchObject({ source: "isbndb", kept: true });
     expect(net.isbndbCalls()).toEqual([]);
   });
 
@@ -433,10 +430,10 @@ describe("lookups with ISBNdb", () => {
     put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
     await app.library.open(root);
     const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    await app.lookup.lookup(id);
+    await lookups.find(app, id);
     expect(net.isbndbCalls()).toEqual([]);
     expect(app.http.usage(0).services.some((s) => s.host === ISBNDB_HOST)).toBe(false);
-    await expect(app.lookup.lookup(id, { source: "isbndb" })).rejects.toThrow("ISBNDB_API_KEY");
-    expect(await app.lookup.isbndbKey()).toBeNull();
+    await expect(lookups.find(app, id, { source: "isbndb" })).rejects.toThrow("ISBNDB_API_KEY");
+    expect(await lookups.isbndbKey(app)).toBeNull();
   });
 });

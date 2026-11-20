@@ -28,7 +28,7 @@ export function missingEnvNames(template: string, existing: string): string[] {
 }
 
 /** A template variable's block: the comment lines directly above its assignment, then the assignment. */
-function templateBlock(templateLines: string[], name: string): string[] {
+function templateBlock(templateLines: readonly string[], name: string): string[] {
   const at = templateLines.findIndex((line) => nameOf(line) === name);
   const start = templateLines
     .slice(0, at)

@@ -1,16 +1,45 @@
 import { existsSync, renameSync } from "node:fs";
 import { join, posix } from "node:path";
-import type { BooksRepo } from "../db/repo/books.ts";
-import type { HashCacheRepo } from "../db/repo/hashCache.ts";
-import type { Library } from "../library/library.ts";
+import type { AppContext } from "../app.ts";
+import * as bookRepo from "../db/repo/books.ts";
+import type { BookRecord } from "../db/repo/books.ts";
+import * as hashCacheRepo from "../db/repo/hashCache.ts";
+import type { IndexedFile } from "../library/libraryIndex.ts";
 import { buildLibraryFilename, withCollisionSuffix } from "../naming/buildFilename.ts";
 import { detectFormat } from "../naming/formats.ts";
-import type { BulkRenameResult } from "../../shared/types.ts";
+import type { BulkRenameResult, RenameResult } from "../../shared/types.ts";
+import { eachSettled } from "./fileOps.ts";
 
-export interface RenameDeps {
-  library: Library;
-  books: BooksRepo;
-  hashCache: HashCacheRepo;
+export type RenameDeps = Pick<AppContext, "db" | "library">;
+
+interface Rename {
+  file: IndexedFile;
+  fromAbs: string;
+  toAbs: string;
+  toRel: string;
+  name: string;
+}
+
+/** A free name for the library filename in `dirAbs`; the file's own current name counts as free. */
+function freeNameFor(dirAbs: string, base: string, ext: string, current: string): string {
+  let n = 1;
+  let name = base;
+  while (name !== current && existsSync(join(dirAbs, name))) name = withCollisionSuffix(base, ext, ++n);
+  return name;
+}
+
+/** Where a file goes under the library pattern, or null when it is already named that way. */
+function planRename(root: string, book: BookRecord, file: IndexedFile): Rename | null {
+  const detected = detectFormat(file.filename);
+  if (!detected) return null;
+  const ext = detected.ext.toLowerCase();
+  const dirRel = posix.dirname(file.relPath);
+  const dirAbs = dirRel === "." ? root : join(root, dirRel);
+  const base = buildLibraryFilename(book, ext);
+  if (file.filename === base) return null;
+  const name = freeNameFor(dirAbs, base, ext, file.filename);
+  if (name === file.filename) return null;
+  return { file, fromAbs: join(dirAbs, file.filename), toAbs: join(dirAbs, name), toRel: dirRel === "." ? name : `${dirRel}/${name}`, name };
 }
 
 /**
@@ -19,40 +48,22 @@ export interface RenameDeps {
  * updated before the watcher reacts (it then sees nothing new).
  */
 export function renameBookFiles(deps: RenameDeps, bookId: number): BulkRenameResult {
-  const { library, books, hashCache } = deps;
+  const { db, library } = deps;
   const root = library.rootPath;
-  const book = books.get(bookId);
-  const out: BulkRenameResult = { renamed: [], errors: [] };
-  if (!root || !book) return out;
+  const book = bookRepo.get(db, bookId);
+  if (!root || !book) return { renamed: [], errors: [] };
 
-  for (const file of library.index.filesOfBook(bookId)) {
-    const detected = detectFormat(file.filename);
-    if (!detected) continue;
-    const ext = detected.ext.toLowerCase();
-    const dirRel = posix.dirname(file.relPath);
-    const dirAbs = dirRel === "." ? root : join(root, dirRel);
-    const base = buildLibraryFilename(book, ext);
-    if (file.filename === base) continue;
-
-    // Find a free name; the file's own current name counts as free.
-    let n = 1;
-    let name = base;
-    while (name !== file.filename && existsSync(join(dirAbs, name))) name = withCollisionSuffix(base, ext, ++n);
-    if (name === file.filename) continue;
-
-    const fromAbs = join(dirAbs, file.filename);
-    const toAbs = join(dirAbs, name);
-    const toRel = dirRel === "." ? name : `${dirRel}/${name}`;
-    try {
-      renameSync(fromAbs, toAbs);
-    } catch (err) {
-      out.errors.push(`${file.relPath}: ${err instanceof Error ? err.message : String(err)}`);
-      continue;
-    }
-    library.index.remove(file.relPath);
-    library.index.set({ ...file, relPath: toRel, filename: name });
-    hashCache.rename(fromAbs, toAbs);
-    out.renamed.push({ from: file.relPath, to: toRel });
-  }
-  return out;
+  const plans = library.index.filesOfBook(bookId).flatMap((file) => planRename(root, book, file) ?? []);
+  const { done, errors } = eachSettled(
+    plans,
+    (p) => p.file.relPath,
+    (p): RenameResult => {
+      renameSync(p.fromAbs, p.toAbs);
+      library.index.remove(p.file.relPath);
+      library.index.set({ ...p.file, relPath: p.toRel, filename: p.name });
+      hashCacheRepo.rename(db, p.fromAbs, p.toAbs);
+      return { from: p.file.relPath, to: p.toRel };
+    },
+  );
+  return { renamed: done, errors };
 }

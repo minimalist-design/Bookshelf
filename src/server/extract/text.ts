@@ -13,12 +13,12 @@ export function decodeEntities(s: string): string {
 /** HTML/XHTML fragment → plain text with paragraph breaks preserved. */
 export function htmlToText(html: string | null | undefined): string | null {
   if (!html) return null;
-  let s = html.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "");
-  s = s.replace(/<br\s*\/?>/gi, "\n");
-  s = s.replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, "\n\n");
-  s = s.replace(/<[^>]+>/g, "");
-  s = decodeEntities(s);
-  s = s
+  const plain = html
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, "\n\n")
+    .replace(/<[^>]+>/g, "");
+  const s = decodeEntities(plain)
     .split(/\n/)
     .map((l) => l.replace(/[ \t ]+/g, " ").trim())
     .join("\n")

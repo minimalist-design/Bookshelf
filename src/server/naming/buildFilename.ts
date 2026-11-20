@@ -32,16 +32,13 @@ export function buildLibraryFilename(meta: NameableMetadata, ext: string): strin
   const idPart = id ? ` [${id}]` : "";
   const budget = MAX_FILENAME_BYTES - COLLISION_RESERVE - byteLength(ext) - byteLength(idPart);
 
-  let a = author;
-  let t = title;
   const sep = " - ";
-  const total = () => byteLength(a) + byteLength(sep) + byteLength(t);
-  if (total() > budget) {
-    // Shrink the title first, keeping at least ~40 bytes of it, then the author part.
-    const minTitle = Math.min(byteLength(t), 40);
-    t = truncateBytes(t, Math.max(minTitle, budget - byteLength(a) - byteLength(sep)));
-    if (total() > budget) a = truncateBytes(a, Math.max(1, budget - byteLength(sep) - byteLength(t)));
-  }
+  const fits = (a: string, t: string) => byteLength(a) + byteLength(sep) + byteLength(t) <= budget;
+  // Shrink the title first, keeping at least ~40 bytes of it, then the author part.
+  const t = fits(author, title)
+    ? title
+    : truncateBytes(title, Math.max(Math.min(byteLength(title), 40), budget - byteLength(author) - byteLength(sep)));
+  const a = fits(author, t) ? author : truncateBytes(author, Math.max(1, budget - byteLength(sep) - byteLength(t)));
   return `${a}${sep}${t}${idPart}${ext}`;
 }
 
