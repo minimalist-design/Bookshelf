@@ -272,7 +272,7 @@ async function run(db: Database, opts: RunOptions): Promise<number> {
   console.log("Everything fetched; making the rows…");
   normalize(db);
   completeReferenceDb(db);
-  console.log("Complete. Import the file in Bookshelf: Settings › Reference data.");
+  console.log("Complete. Import the file in Bookshelf: POST /api/reference/from-file {\"path\": …} or POST /api/reference.");
   printProgress(db);
   return 0;
 }

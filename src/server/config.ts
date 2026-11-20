@@ -10,7 +10,7 @@ export interface AppConfig {
   /** The configured port; null when none is assigned yet (`"port": 0`), and one is picked on first start. */
   port: number | null;
   hostname: string;
-  /** Library root set in the config file (`library_root`); overrides and locks the UI setting when present. */
+  /** Library root set in the config file (`library_root`); overrides and locks the `libraryRoot` setting when present. */
   configLibraryRoot: string | null;
   isProduction: boolean;
   /** Largest accepted upload (`max_upload_mb`, default 16 GiB). */
@@ -24,14 +24,13 @@ export interface IsbndbConfig {
   apiKey: string | null;
   dailyLimit: number;
   perSecond: number;
-  bulkSize: number;
 }
 
 /** The secrets read from the environment; `.env.example` lists exactly these (a test checks it). */
 export const SECRET_ENV_NAMES = ["ISBNDB_API_KEY"] as const;
 
 /** Basic plan limits, used when the config file doesn't set them. */
-export const ISBNDB_DEFAULTS = { dailyLimit: 5000, perSecond: 1, bulkSize: 100 } as const;
+export const ISBNDB_DEFAULTS = { dailyLimit: 5000, perSecond: 1 } as const;
 
 /**
  * Turns the config file's settings into the app's config, filling in defaults. `env` only supplies
@@ -54,7 +53,6 @@ export function loadConfig(file: ConfigFileSettings = {}, env: Record<string, st
       apiKey: env.ISBNDB_API_KEY?.trim() || null,
       dailyLimit: positive(file.isbndb_daily_limit) ?? ISBNDB_DEFAULTS.dailyLimit,
       perSecond: positive(file.isbndb_per_second) ?? ISBNDB_DEFAULTS.perSecond,
-      bulkSize: Math.floor(positive(file.isbndb_bulk_size) ?? ISBNDB_DEFAULTS.bulkSize),
     },
   };
 }

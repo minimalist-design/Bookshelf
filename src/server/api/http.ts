@@ -12,6 +12,11 @@ export function json(data: unknown, init?: ResponseInit): Response {
   return Response.json(data, init);
 }
 
+/** Any path outside the API: the HTTP API is the only interface. */
+export function notFound(): Response {
+  return json({ error: "Not found" }, { status: 404 });
+}
+
 /** Wrap a handler so domain errors map to proper HTTP status codes. */
 export function handle<R extends Request>(fn: (req: R) => Response | Promise<Response>) {
   return async (req: R): Promise<Response> => {

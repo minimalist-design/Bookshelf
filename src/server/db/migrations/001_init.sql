@@ -21,6 +21,8 @@ CREATE TABLE books (
   description      TEXT,
   series           TEXT,
   series_index     REAL,
+  -- Edition statement as printed ("2nd", "Revised", "25th Anniversary Edition"); free text, not a number.
+  edition          TEXT,
   rating           INTEGER CHECK (rating IS NULL OR rating BETWEEN 0 AND 5),
   notes            TEXT,
   has_cover        INTEGER NOT NULL DEFAULT 0,
@@ -30,7 +32,6 @@ CREATE TABLE books (
   metadata_source  TEXT,     -- 'embedded' | 'filename' | 'mixed'
   confirmed_source TEXT,     -- NULL | 'openlibrary' | 'doi' | 'manual'
   confirmed_at     TEXT,
-  reading_position TEXT,
   created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -89,3 +90,62 @@ CREATE TABLE http_cache (
   body       TEXT NOT NULL,
   fetched_at TEXT NOT NULL
 );
+
+-- Requests sent to metadata services (not cache hits), for the usage summary; pruned after a day.
+CREATE TABLE http_calls (
+  host TEXT NOT NULL,
+  at   INTEGER NOT NULL,           -- epoch ms
+  cost INTEGER NOT NULL DEFAULT 1  -- what it was charged against the service's daily quota (0 for cover images)
+);
+CREATE INDEX http_calls_host_at ON http_calls (host, at);
+
+-- Lookup results waiting for review (bulk lookups). Candidates only; diffs are recomputed against
+-- the current metadata when read.
+CREATE TABLE review_queue (
+  book_id    INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  payload    TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Bulk metadata lookups waiting to run, and their results (kept so progress survives restarts).
+-- Finished jobs of earlier runs are kept for a while, so a book's outcome can still be read.
+CREATE TABLE lookup_jobs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id     INTEGER NOT NULL UNIQUE REFERENCES books(id) ON DELETE CASCADE,
+  state       TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'done', 'no_match', 'failed')),
+  error       TEXT,
+  run         INTEGER NOT NULL DEFAULT 0,
+  enqueued_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  finished_at TEXT
+);
+CREATE INDEX lookup_jobs_state ON lookup_jobs (state, id);
+CREATE INDEX lookup_jobs_run ON lookup_jobs (run);
+
+-- Spelling variants merged into one name. New imports and lookups get `canonical` for any name
+-- whose folded form (case, accents, spacing removed) is `variant`.
+CREATE TABLE aliases (
+  field     TEXT NOT NULL,   -- 'authors' | 'tags' | 'series' | 'publishers'
+  variant   TEXT NOT NULL,   -- folded form of the variant
+  name      TEXT NOT NULL,   -- the variant as it was written, for display
+  canonical TEXT NOT NULL,
+  PRIMARY KEY (field, variant)
+);
+
+-- Every book record received from ISBNdb, kept for good: a local copy of what the daily quota paid for,
+-- whether or not the book is in the library (search results that were the wrong book included).
+-- Lookups read it before asking ISBNdb. Unlike http_cache, nothing expires or clears it.
+-- Cover images are downloaded into <data dir>/isbndb-covers (placeholders too).
+CREATE TABLE isbndb_records (
+  isbn13      TEXT PRIMARY KEY,
+  title       TEXT,
+  authors     TEXT NOT NULL DEFAULT '[]', -- JSON array, for finding records by name
+  record      TEXT NOT NULL,              -- the record exactly as ISBNdb sent it (JSON, every field)
+  via         TEXT NOT NULL,              -- the call it came from: 'book' | 'search'
+  fetched_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  -- NULL still to download · 'done' · 'none' the record has no image · 'failed' gave up.
+  cover_state TEXT,
+  cover_file  TEXT,                       -- file name in that directory
+  cover_bytes INTEGER
+);
+CREATE INDEX isbndb_records_title ON isbndb_records (title COLLATE NOCASE);
+CREATE INDEX isbndb_records_cover_pending ON isbndb_records (fetched_at) WHERE cover_state IS NULL;

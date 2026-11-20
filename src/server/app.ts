@@ -13,7 +13,6 @@ import { createExtractor, type Extractor } from "./extract/index.ts";
 import { BookService } from "./services/bookService.ts";
 import { ImportService } from "./services/importService.ts";
 import { ShelfService } from "./services/shelfService.ts";
-import { ReaderService } from "./services/readerService.ts";
 import { MaintenanceService } from "./services/maintenanceService.ts";
 import { LookupService } from "./services/lookupService.ts";
 import { CleanupService } from "./services/cleanupService.ts";
@@ -44,7 +43,6 @@ export interface AppContext {
   /** Downloads the kept records' cover images. */
   isbndbCovers: IsbndbCoverDownloader;
   lookup: LookupService;
-  reader: ReaderService;
   maintenance: MaintenanceService;
   cleanup: CleanupService;
   /** Imported reference files (authors and books from Wikidata and other sources), apart from the library database. */
@@ -122,7 +120,6 @@ export function createApp(config: AppConfig = loadConfig(readConfigFile()), opti
     isbndbRecords,
     isbndbCovers,
     lookup,
-    reader: new ReaderService({ library, books, tools }),
     maintenance: new MaintenanceService({ config, db, library, books, covers, bookService, events }),
     cleanup: new CleanupService({ library, books, hashCache, aliases, http, events }),
     shelfService: new ShelfService({ library, hashCache, events }),

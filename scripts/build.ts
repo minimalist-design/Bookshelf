@@ -1,15 +1,14 @@
 #!/usr/bin/env bun
 /**
- * Builds a self-contained executable: server, pre-bundled web app, SQL migrations and pdf.js assets, all in one
- * file with no `node_modules` needed at runtime.
+ * Builds a self-contained executable: the server and its SQL migrations in one file, with no `node_modules` needed
+ * at runtime.
  *
  *   bun run build                    → dist/bookshelf (current platform; `make build` writes ./bookshelf)
  *   bun run build --target=linux-arm64 --outfile=dist/bookshelf-arm64
  */
-import { readdirSync, rmSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { rmSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { isPdfjsAsset, PDFJS_KINDS } from "../src/server/api/pdfjsAssets.ts";
 
 const ROOT = resolve(import.meta.dir, "..");
 const { values: args } = parseArgs({
@@ -19,34 +18,6 @@ const { values: args } = parseArgs({
     target: { type: "string" },
   },
 });
-
-/** Replaces `src/server/api/pdfjsAssets.ts` with a version that embeds every served file in the executable. */
-const pdfjsEmbedPlugin: Bun.BunPlugin = {
-  name: "embed-pdfjs-assets",
-  setup(build) {
-    build.onLoad({ filter: /[\\/]src[\\/]server[\\/]api[\\/]pdfjsAssets\.ts$/ }, () => {
-      const pdfjsDir = dirname(Bun.resolveSync("pdfjs-dist/package.json", ROOT));
-      const imports: string[] = [];
-      const entries: string[] = [];
-      for (const [kind, { dir }] of Object.entries(PDFJS_KINDS)) {
-        for (const name of readdirSync(join(pdfjsDir, dir)).sort()) {
-          if (!isPdfjsAsset(kind, name)) continue; // e.g. the unminified worker, source maps, LICENSE files
-          const id = `f${imports.length}`;
-          imports.push(`import ${id} from ${JSON.stringify(join(pdfjsDir, dir, name))} with { type: "file" };`);
-          entries.push(`  ${JSON.stringify(`${kind}/${name}`)}: ${id},`);
-        }
-      }
-      const contents = [
-        ...imports,
-        `export const PDFJS_KINDS = ${JSON.stringify(PDFJS_KINDS)};`,
-        `const FILES = new Map(Object.entries({\n${entries.join("\n")}\n}));`,
-        `export function pdfjsAssetPath(kind, name) { return FILES.get(kind + "/" + name) ?? null; }`,
-      ].join("\n");
-      console.log(`Embedding ${imports.length} pdf.js assets`);
-      return { contents, loader: "js" };
-    });
-  },
-};
 
 const outfile = resolve(ROOT, args.outfile);
 const result = await Bun.build({
@@ -63,7 +34,6 @@ const result = await Bun.build({
   // Embedded in the executable so stack traces point at the original sources.
   sourcemap: "inline",
   define: { "process.env.NODE_ENV": JSON.stringify("production") },
-  plugins: [pdfjsEmbedPlugin],
 });
 
 if (!result.success) {

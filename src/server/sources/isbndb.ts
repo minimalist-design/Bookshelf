@@ -72,7 +72,7 @@ async function getJson<T>(http: HttpClient, url: string, apiKey: string, fresh: 
   }
 }
 
-/** The URL of one book, also the cache key that bulk calls fill in. */
+/** The URL of one book, also its cache key. */
 export const isbndbBookUrl = (isbn13: string) => `${API}/book/${isbn13}`;
 
 const label = (parts: (string | number | null | undefined)[]) =>

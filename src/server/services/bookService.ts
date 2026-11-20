@@ -7,6 +7,7 @@ import type { EventBus } from "../events.ts";
 import type { Extractor } from "../extract/index.ts";
 import { yearFrom } from "../extract/merge.ts";
 import { normalizeDate } from "../extract/text.ts";
+import type { IndexedFile } from "../library/libraryIndex.ts";
 import type { Library } from "../library/library.ts";
 import { validateShelfName, ValidationError } from "../library/paths.ts";
 import { toDetail } from "../library/queries.ts";
@@ -39,9 +40,17 @@ export interface UpdateOptions {
 const MAX_TEXT = 200;
 const MAX_LONG_TEXT = 50_000;
 
-/** Book-level operations initiated by the user: edit, normalize filenames, merge, detach, cover. */
+/** Book-level operations: edit, normalize filenames, merge, detach, cover, file access. */
 export class BookService {
   constructor(private readonly deps: BookServiceDeps) {}
+
+  /** The on-disk file `hash` of book `bookId` (404 unless both exist and belong together). */
+  fileOf(bookId: number, hash: string): { abs: string; file: IndexedFile } {
+    const file = this.deps.library.index.filesOfBook(bookId).find((f) => f.hash === hash);
+    const root = this.deps.library.rootPath;
+    if (!file || !root) throw new NotFoundError("File not found");
+    return { abs: join(root, file.relPath), file };
+  }
 
   /** Books are only addressable while at least one of their files is on disk. */
   private requireVisible(id: number): BookRecord {

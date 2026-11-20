@@ -18,7 +18,7 @@ export const CURRENT_VERSION = TEMPLATE.version as number;
 /** Settings as written in the file. Missing or empty values fall back to the defaults (see `loadConfig`). */
 export interface ConfigFileSettings {
   version?: number;
-  /** Library directory; when set it locks the setting in the web UI. Empty: chosen in the UI. */
+  /** Library directory; when set it locks the `libraryRoot` setting. Empty: set through the API. */
   library_root?: string;
   /** Database and covers. Empty: `$XDG_DATA_HOME/bookshelf` or `~/.local/share/bookshelf`. */
   data_dir?: string;
@@ -26,12 +26,10 @@ export interface ConfigFileSettings {
   /** 0: not assigned yet; the first start picks a free one in 20000–20999 and writes it here. */
   port?: number;
   max_upload_mb?: number;
-  /** ISBNdb calls allowed per day (the plan's daily quota; each ISBN in a bulk call counts as one). */
+  /** ISBNdb calls allowed per day (the plan's daily quota). */
   isbndb_daily_limit?: number;
   /** ISBNdb requests per second (the plan's rate limit). */
   isbndb_per_second?: number;
-  /** Most ISBNs in one ISBNdb bulk call (the plan's bulk limit). */
-  isbndb_bulk_size?: number;
 }
 
 const TYPES: Record<keyof ConfigFileSettings, "string" | "number"> = {
@@ -43,7 +41,6 @@ const TYPES: Record<keyof ConfigFileSettings, "string" | "number"> = {
   max_upload_mb: "number",
   isbndb_daily_limit: "number",
   isbndb_per_second: "number",
-  isbndb_bulk_size: "number",
 };
 
 export class ConfigError extends Error {}

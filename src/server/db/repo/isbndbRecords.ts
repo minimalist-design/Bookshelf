@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 /** Which ISBNdb call a record came from. */
-export type IsbndbVia = "book" | "bulk" | "search";
+export type IsbndbVia = "book" | "search";
 
 /** A record as ISBNdb sent it: only the fields Bookshelf reads are named; every other field is kept too. */
 export interface IsbndbRecord {

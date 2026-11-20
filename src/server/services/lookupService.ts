@@ -68,7 +68,7 @@ export interface LookupOptions {
 const COVER_HOSTS = new Set(["covers.openlibrary.org", "images.isbndb.com"]);
 /** Books whose lookup time feeds the time-left estimate. */
 const ETA_WINDOW = 20;
-/** Finished jobs of earlier runs are kept this long (the Add books page reads their outcome). */
+/** Finished jobs of earlier runs are kept this long (clients read their outcome through /api/lookup/jobs). */
 const OLD_JOB_RETENTION = "-1 day";
 /** Works whose editions are listed in the cover picker (one request each, throttled to 1/s). */
 const MAX_EXPANDED_WORKS = 3;

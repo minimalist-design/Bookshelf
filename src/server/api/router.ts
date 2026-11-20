@@ -1,13 +1,11 @@
 import type { AppContext } from "../app.ts";
 import { LOOKUP_SOURCES, type ApplyMetadataRequest, type BookUpdate, type LookupSource, type SettingsUpdate } from "../../shared/types.ts";
 import { ValidationError } from "../library/paths.ts";
-import { browseDirectories, makeDirectory } from "./fsBrowse.ts";
 import { health } from "./health.ts";
-import { handle, json, readJson } from "./http.ts";
+import { handle, json, notFound, readJson } from "./http.ts";
 import { bookDetail, coverResponse, facets, libraryPage, shelves } from "./library.ts";
 import { getSettings, updateSettings } from "./settings.ts";
 import { CONTENT_TYPES, contentDisposition, serveFile } from "./files.ts";
-import { pdfjsAssetPath } from "./pdfjsAssets.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
@@ -15,15 +13,6 @@ export function apiRoutes(app: AppContext) {
     "/api/settings": {
       GET: handle(() => json(getSettings(app))),
       PUT: handle(async (req) => json(updateSettings(app, await readJson<SettingsUpdate>(req)))),
-    },
-    "/api/fs/browse": {
-      GET: handle((req) => json(browseDirectories(new URL(req.url).searchParams.get("path")))),
-    },
-    "/api/fs/mkdir": {
-      POST: handle(async (req) => {
-        const body = await readJson<{ parent: unknown; name: unknown }>(req);
-        return json(makeDirectory(body.parent, body.name), { status: 201 });
-      }),
     },
     "/api/library": { GET: handle((req) => json(libraryPage(app, new URL(req.url)))) },
     "/api/library/status": { GET: () => json(app.library.status()) },
@@ -122,27 +111,6 @@ export function apiRoutes(app: AppContext) {
         const status = result.status === "duplicate" ? 409 : result.status === "attached" ? 200 : 201;
         return json(result, { status });
       }),
-    },
-    "/api/books/:id/files/:hash/pages": {
-      GET: handle(async (req: Bun.BunRequest<"/api/books/:id/files/:hash/pages">) =>
-        json({ count: await app.reader.pageCount(Number(req.params.id), req.params.hash) }),
-      ),
-    },
-    "/api/books/:id/files/:hash/pages/:n": {
-      GET: handle(async (req: Bun.BunRequest<"/api/books/:id/files/:hash/pages/:n">) => {
-        const { id, hash, n } = req.params;
-        const img = await app.reader.page(Number(id), hash, Number(n));
-        // The URL contains the content hash, so a page never changes.
-        return new Response(img.data as BodyInit & Uint8Array, { headers: { "Content-Type": img.mime, "Cache-Control": "private, max-age=31536000, immutable" } });
-      }),
-    },
-    "/api/books/:id/position": {
-      PUT: handle(async (req: Bun.BunRequest<"/api/books/:id/position">) =>
-        json(app.reader.savePosition(Number(req.params.id), await readJson(req))),
-      ),
-    },
-    "/vendor/pdfjs/:kind/:name": {
-      GET: handle((req: Bun.BunRequest<"/vendor/pdfjs/:kind/:name">) => pdfjsAsset(req)),
     },
     "/api/maintenance/stats": { GET: handle(() => json(app.maintenance.stats())) },
     "/api/maintenance/missing": {
@@ -260,7 +228,7 @@ export function apiRoutes(app: AppContext) {
         return json(app.lookup.status());
       }),
     },
-    "/api/*": () => json({ error: "Not found" }, { status: 404 }),
+    "/api/*": notFound,
   } as const;
 }
 
@@ -277,21 +245,11 @@ function nameOf(body: { name: unknown }): string {
 }
 
 function bookFile(app: AppContext, req: Bun.BunRequest<"/api/books/:id/files/:hash">): Response {
-  const { abs, file } = app.reader.file(Number(req.params.id), req.params.hash);
+  const { abs, file } = app.bookService.fileOf(Number(req.params.id), req.params.hash);
   const download = new URL(req.url).searchParams.has("download");
   return serveFile(req, abs, {
     contentType: file.filename.toLowerCase().endsWith(".zip") || file.filename.toLowerCase().endsWith(".fbz") ? "application/zip" : CONTENT_TYPES[file.format],
     etag: file.hash,
     disposition: contentDisposition(download ? "attachment" : "inline", file.filename),
   });
-}
-
-/** pdf.js worker, CMaps, fonts, image decoders and ICC profiles for the browser PDF reader (allow-listed names only). */
-function pdfjsAsset(req: Bun.BunRequest<"/vendor/pdfjs/:kind/:name">): Response {
-  const { kind, name } = req.params;
-  const path = pdfjsAssetPath(kind, name);
-  if (!path) return json({ error: "Not found" }, { status: 404 });
-  // application/wasm is required for WebAssembly.instantiateStreaming.
-  const contentType = /\.m?js$/.test(name) ? "text/javascript" : name.endsWith(".wasm") ? "application/wasm" : "application/octet-stream";
-  return serveFile(req, path, { contentType, etag: `pdfjs-${name}`, cacheControl: "public, max-age=86400" });
 }

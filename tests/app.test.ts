@@ -5,13 +5,12 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, type AppContext } from "../src/server/app.ts";
-import { migrate } from "../src/server/db/migrate.ts";
+import { migrate, SCHEMA_VERSION, UnknownSchemaError } from "../src/server/db/migrate.ts";
+import { openDatabase } from "../src/server/db/index.ts";
 import { loadConfig } from "../src/server/config.ts";
 import type { ConfigFileSettings } from "../src/server/configFile.ts";
 import { getSettings, prepareConfigLibraryRoot, updateSettings } from "../src/server/api/settings.ts";
 import { health } from "../src/server/api/health.ts";
-import { browseDirectories, makeDirectory } from "../src/server/api/fsBrowse.ts";
-import { ConflictError, NotFoundError } from "../src/server/api/http.ts";
 import { validateShelfName, ValidationError } from "../src/server/library/paths.ts";
 
 const tmp = mkdtempSync(join(tmpdir(), "bookshelf-test-"));
@@ -33,10 +32,11 @@ describe("database", () => {
     const app = makeApp();
     const tables = app.db.query("SELECT name FROM sqlite_master WHERE type IN ('table')").all() as { name: string }[];
     const names = tables.map((t) => t.name);
-    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "lookup_jobs", "http_calls", "aliases"]) {
+    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "http_cache", "review_queue", "lookup_jobs", "http_calls", "aliases", "isbndb_records"]) {
       expect(names).toContain(t);
     }
-    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
+    expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
+    expect(migrate(app.db)).toBe(0);
   });
 
   /**
@@ -53,29 +53,20 @@ describe("database", () => {
     );
     // Add a line for each new migration; never change one.
     expect(sums).toEqual({
-      "001_init.sql": "5f3162c089b08298",
-      "002_review_queue.sql": "9c538e6a51a7ca65",
-      "003_edition.sql": "671292e44235d372",
-      "004_lookup_jobs.sql": "018606fdcdee3dd5",
-      "005_http_calls.sql": "de6e60317691c408",
-      "006_aliases.sql": "d1396176e873a348",
-      "007_http_call_cost.sql": "1908ac0b6b072289",
-      "008_isbndb_records.sql": "4e87edd6eb818b3a",
-      "009_isbndb_covers.sql": "3e8b7c6b4ef09ae1",
+      "001_init.sql": "0434772728296ab2",
     });
   });
 
-  test("a database left at an earlier version gets only the newer migrations, keeping its data", () => {
-    const dir = join(import.meta.dir, "../src/server/db/migrations");
-    const db = new Database(":memory:");
-    // As a database migrated before the cover columns existed (version 8), holding a kept record.
-    for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().slice(0, 8)) db.exec(readFileSync(join(dir, f), "utf8"));
-    db.exec("PRAGMA user_version = 8");
-    db.query("INSERT INTO isbndb_records (isbn13, record, via) VALUES ('9780441172719', '{}', 'bulk')").run();
-    expect(migrate(db)).toBe(1);
-    expect(db.query("SELECT isbn13, cover_state FROM isbndb_records").all()).toEqual([{ isbn13: "9780441172719", cover_state: null }]); // its cover is queued
-    expect(migrate(db)).toBe(0);
+  test("a database from before the schema reset is refused, untouched", () => {
+    const path = join(tmp, "old.db");
+    const db = new Database(path);
+    db.exec("CREATE TABLE books (id INTEGER PRIMARY KEY); PRAGMA user_version = 9");
     db.close();
+    expect(() => openDatabase(path)).toThrow(UnknownSchemaError);
+    expect(() => openDatabase(path)).toThrow(/delete the data directory.*data directory: /s);
+    const after = new Database(path);
+    expect((after.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(9);
+    after.close();
   });
 });
 
@@ -169,24 +160,5 @@ describe("shelf names", () => {
   test("validation", () => {
     expect(validateShelfName("  Science Fiction ")).toBe("Science Fiction");
     for (const bad of ["", "..", ".hidden", "a/b", "a\\b"]) expect(() => validateShelfName(bad)).toThrow(ValidationError);
-  });
-});
-
-describe("directory browser", () => {
-  test("missing directory is a 404", () => {
-    expect(() => browseDirectories(join(tmp, "nope"))).toThrow(NotFoundError);
-  });
-
-  test("create a folder", () => {
-    const parent = join(tmp, "mkdir-parent");
-    mkdirSync(parent, { recursive: true });
-    const { path } = makeDirectory(parent, " Books ");
-    expect(path).toBe(join(parent, "Books"));
-    expect(browseDirectories(parent).dirs.map((d) => d.name)).toEqual(["Books"]);
-    expect(() => makeDirectory(parent, "Books")).toThrow(ConflictError);
-    for (const bad of ["", "..", "../x", "a/b", ".hidden"]) expect(() => makeDirectory(parent, bad)).toThrow(ValidationError);
-    expect(() => makeDirectory(join(tmp, "nope"), "x")).toThrow(NotFoundError);
-    writeFileSync(join(parent, "file"), "");
-    expect(() => makeDirectory(join(parent, "file"), "x")).toThrow(ValidationError);
   });
 });

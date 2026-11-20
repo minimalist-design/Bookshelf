@@ -10,13 +10,13 @@ export interface ExternalToolsStatus {
 
 export interface SettingsDto {
   libraryRoot: string | null;
-  /** True when `library_root` is set in the config file; the root cannot be changed from the UI. */
+  /** True when `library_root` is set in the config file; the root cannot be changed through the API. */
   libraryRootFromConfig: boolean;
   contactEmail: string | null;
   dataDir: string;
   tools: ExternalToolsStatus;
   /** ISBNdb is used (an API key is set in the environment), with the limits from the config file. */
-  isbndb: { configured: boolean; dailyLimit: number; perSecond: number; bulkSize: number };
+  isbndb: { configured: boolean; dailyLimit: number; perSecond: number };
 }
 
 /** The plan behind the ISBNdb key and today's quota, as ISBNdb reports it. */
@@ -29,22 +29,11 @@ export interface IsbndbKeyDto {
 }
 
 export interface SettingsUpdate {
-  /** `null` unlinks the library (nothing on disk is touched); the UI then shows first-run setup again. */
+  /** `null` unlinks the library (nothing on disk is touched). */
   libraryRoot?: string | null;
-  /** Create `libraryRoot` (and missing parents) when it does not exist yet; used by first-run setup. */
+  /** Create `libraryRoot` (and missing parents) when it does not exist yet. */
   createLibraryRoot?: boolean;
   contactEmail?: string | null;
-}
-
-export interface DirEntry {
-  name: string;
-  path: string;
-}
-
-export interface BrowseResult {
-  path: string;
-  parent: string | null;
-  dirs: DirEntry[];
 }
 
 export interface ApiError {
@@ -86,8 +75,6 @@ export interface BookSummaryDto {
   createdAt: string;
   files: BookFileDto[];
   shelves: (string | null)[];
-  /** Reading progress 0..1, when the book has been opened in the reader. */
-  progress: number | null;
 }
 
 export interface BookDetailDto extends BookSummaryDto {
@@ -102,23 +89,7 @@ export interface BookDetailDto extends BookSummaryDto {
   olEditionKey: string | null;
   olWorkKey: string | null;
   confirmedAt: string | null;
-  readingPosition: ReadingPosition | null;
   updatedAt: string;
-}
-
-/** Where the reader left off, per book (the file it was read in + a format-specific locator). */
-export interface ReadingPosition {
-  /** Content hash of the file being read. */
-  hash: string;
-  /** EPUB: CFI · PDF/comics/DJVU: 1-based page number. */
-  position: string;
-  /** 0..1 when known. */
-  fraction: number | null;
-  updatedAt: string;
-}
-
-export interface PagesDto {
-  count: number;
 }
 
 export type LibrarySort = "title" | "author" | "added" | "year" | "series" | "rating";
@@ -483,7 +454,7 @@ export interface MissingBookDto {
   updatedAt: string;
 }
 
-/** An imported reference file (Settings › Reference data). */
+/** An imported reference file (`/api/reference`). */
 export interface ReferenceSourceDto {
   source: string;
   /** Display name, e.g. "Wikidata". */

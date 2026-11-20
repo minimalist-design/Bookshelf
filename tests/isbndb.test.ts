@@ -419,7 +419,7 @@ describe("lookups with ISBNdb", () => {
     const server = Bun.serve({ port: 0, routes: apiRoutes(app) });
     try {
       const settings = await (await fetch(`${server.url}api/settings`)).json();
-      expect(settings.isbndb).toEqual({ configured: true, dailyLimit: 5000, perSecond: 1, bulkSize: 100 });
+      expect(settings.isbndb).toEqual({ configured: true, dailyLimit: 5000, perSecond: 1 });
       expect(await (await fetch(`${server.url}api/isbndb/key`)).json()).toEqual({ planName: "Basic", bulkLimit: 100, total: 5000, spent: 1000, left: 4000 });
       expect(app.http.spentToday(ISBNDB_HOST)).toBe(0); // checking the key is free
     } finally {

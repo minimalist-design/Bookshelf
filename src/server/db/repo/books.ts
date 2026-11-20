@@ -18,7 +18,6 @@ export interface BookRecord extends BookMetadata {
   metadataSource: MetadataSource | null;
   confirmedSource: ConfirmedSource | null;
   confirmedAt: string | null;
-  readingPosition: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,7 +47,6 @@ interface BookRow {
   metadata_source: MetadataSource | null;
   confirmed_source: ConfirmedSource | null;
   confirmed_at: string | null;
-  reading_position: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -244,11 +242,6 @@ export class BooksRepo {
       .run(source, id);
   }
 
-  /** Reader state; deliberately does not touch updated_at (not a metadata change). */
-  setReadingPosition(id: number, json: string | null): void {
-    this.db.query("UPDATE books SET reading_position = ? WHERE id = ?").run(json, id);
-  }
-
   setOpenLibraryKeys(id: number, edition: string | null, work: string | null): void {
     this.db.query("UPDATE books SET ol_edition_key = ?, ol_work_key = ? WHERE id = ?").run(edition, work, id);
   }
@@ -271,7 +264,7 @@ export class BooksRepo {
       .run(hash, bookId, format);
   }
 
-  /** Bumps updated_at: the web UI uses it to bust the browser's cached cover image. */
+  /** Bumps updated_at, so clients know a cached cover image is stale. */
   setHasCover(id: number, hasCover: boolean, source: string | null): void {
     this.db
       .query("UPDATE books SET has_cover = ?, cover_source = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?")
@@ -397,7 +390,6 @@ function toRecord(r: BookRow): BookRecord {
     metadataSource: r.metadata_source,
     confirmedSource: r.confirmed_source,
     confirmedAt: r.confirmed_at,
-    readingPosition: r.reading_position,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

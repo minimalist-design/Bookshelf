@@ -5,6 +5,7 @@
  */
 import { configCommand, USAGE } from "./cli.ts";
 import { ConfigError } from "./configFile.ts";
+import { UnknownSchemaError } from "./db/migrate.ts";
 import { PortError } from "./listen.ts";
 import { SERVICE_INFO_COMMANDS, serviceInfo } from "./serviceInfo.ts";
 
@@ -24,7 +25,7 @@ try {
     process.exit(2);
   }
 } catch (err) {
-  if (!(err instanceof ConfigError || err instanceof PortError)) throw err;
+  if (!(err instanceof ConfigError || err instanceof PortError || err instanceof UnknownSchemaError)) throw err;
   console.error(`bookshelf: ${err.message}`);
   process.exit(1);
 }

@@ -2,7 +2,6 @@ import { readdirSync } from "node:fs";
 import type { BookRecord, BooksRepo } from "../db/repo/books.ts";
 import { toSortName } from "../naming/authors.ts";
 import type {
-  ReadingPosition,
   FacetDto,
   LibraryFacets,
   BookDetailDto,
@@ -48,18 +47,7 @@ export function toSummary(b: BookRecord, files: IndexedFile[]): BookSummaryDto {
     createdAt: b.createdAt,
     files: files.map(fileDto),
     shelves,
-    progress: parsePosition(b.readingPosition)?.fraction ?? null,
   };
-}
-
-export function parsePosition(raw: string | null): ReadingPosition | null {
-  if (!raw) return null;
-  try {
-    const p = JSON.parse(raw) as ReadingPosition;
-    return typeof p?.hash === "string" && typeof p?.position === "string" ? p : null;
-  } catch {
-    return null;
-  }
 }
 
 export function toDetail(b: BookRecord, files: IndexedFile[]): BookDetailDto {
@@ -75,7 +63,6 @@ export function toDetail(b: BookRecord, files: IndexedFile[]): BookDetailDto {
     olEditionKey: b.olEditionKey,
     olWorkKey: b.olWorkKey,
     confirmedAt: b.confirmedAt,
-    readingPosition: parsePosition(b.readingPosition),
     updatedAt: b.updatedAt,
   };
 }

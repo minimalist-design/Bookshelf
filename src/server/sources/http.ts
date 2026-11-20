@@ -63,7 +63,7 @@ export const serviceName = (host: string): string => HOST_LIMITS[host]?.name ?? 
 /** Extra request details: headers (an API key), and what the request costs against a daily quota. */
 export interface RequestOptions {
   headers?: Record<string, string>;
-  /** Daily-quota calls this request is charged (default 1; an ISBNdb bulk call costs one per ISBN). */
+  /** Daily-quota calls this request is charged (default 1; 0 for requests outside the quota). */
   cost?: number;
 }
 

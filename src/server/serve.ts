@@ -1,6 +1,6 @@
-import index from "../web/index.html";
 import { createApp } from "./app.ts";
 import { apiRoutes } from "./api/router.ts";
+import { notFound } from "./api/http.ts";
 import { prepareConfigLibraryRoot } from "./api/settings.ts";
 import { configPath, CURRENT_VERSION, fileVersion, tilde, writeConfigPort } from "./configFile.ts";
 import { listen } from "./listen.ts";
@@ -34,9 +34,8 @@ const { server, port, assigned } = listen(
         ...apiRoutes(app),
         "/ws": (req, srv) =>
           srv.upgrade(req) ? undefined : new Response("WebSocket upgrade expected", { status: 400 }),
-        // SPA: every other path serves the React app.
-        "/*": index,
       },
+      fetch: notFound,
       websocket: {
         open(ws) {
           ws.subscribe(EVENTS_TOPIC);
@@ -46,7 +45,7 @@ const { server, port, assigned } = listen(
           /* server → client only */
         },
       },
-      development: app.config.isProduction ? false : { hmr: true, console: true },
+      development: !app.config.isProduction,
     }),
   tilde(configPath()),
 );
@@ -65,7 +64,7 @@ console.log(`Bookshelf running at ${server.url}`);
 console.log(`Config: ${configPath()}`);
 console.log(`Data directory: ${app.config.dataDir}`);
 const root = app.libraryRoot();
-console.log(`Library root: ${root ?? "(not configured — open the web UI to choose one)"}`);
+console.log(`Library root: ${root ?? "(not configured — set libraryRoot with PUT /api/settings, or library_root in the config)"}`);
 app.library.open(root).catch((err) => console.error("Library scan failed:", err));
 
 const shutdown = async () => {

@@ -6,7 +6,7 @@ SQLite database in the format described here. The format doesn't depend on the s
 
 - a **builder** (a script such as `scripts/wikidata/build.ts`, or Bookshelf itself for the services it asks)
   knows its source and writes the file;
-- **Bookshelf** only knows this format. It imports a finished file in *Settings › Reference data* and keeps it
+- **Bookshelf** only knows this format. It imports a finished file through `/api/reference` and keeps it
   next to its own database, at `<data dir>/reference/<source>.sqlite`. Importing a newer file for the same
   source replaces the old one; the library database is never touched.
 

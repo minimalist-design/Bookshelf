@@ -42,7 +42,7 @@ export class ReferenceStore {
     return SOURCE_NAME.test(source) && isFile(path) ? path : null;
   }
 
-  /** Import a file uploaded by the browser (the request body, streamed to disk). */
+  /** Import an uploaded file (the request body, streamed to disk). */
   async importUpload(body: ReadableStream<Uint8Array> | null, fileName: string): Promise<ReferenceSourceDto> {
     if (!body) throw new ValidationError("Empty upload");
     const tmp = this.incoming();
