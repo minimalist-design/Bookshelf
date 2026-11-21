@@ -13,7 +13,6 @@ import { uniqueBy } from "../../collections.ts";
 import { NotFoundError } from "../../api/http.ts";
 import { ValidationError } from "../../library/paths.ts";
 import { toSummary } from "../../library/queries.ts";
-import { applyRules } from "../../metadata/rules.ts";
 import { normalizeDoi } from "../../naming/doi.ts";
 import { normalizeIsbn } from "../../naming/isbn.ts";
 import { diffMetadata } from "../../sources/diff.ts";
@@ -46,7 +45,7 @@ export interface LookupOptions {
 
 /** What asking the sources needs. ISBNdb's API is asked only when picked by name (its calls are paid). */
 export type SourceDeps = Pick<AppContext, "http" | "config" | "isbndbStore">;
-type ViewDeps = Pick<AppContext, "db" | "library" | "aliases">;
+type ViewDeps = Pick<AppContext, "db" | "library">;
 type LookupDeps = ViewDeps & SourceDeps & Pick<AppContext, "events" | "lookup">;
 type ApplyDeps = LookupDeps & Pick<AppContext, "config" | "isbndbCovers">;
 
@@ -220,7 +219,7 @@ export async function findCandidates(
     kept?.sure || (kept && !useIsbndb)
       ? { value: kept.candidates, errors: [] }
       : useIsbndb
-        ? await run("ISBNdb search", () => isbndbSearch(http, key!, store, query, 8, fresh))
+        ? await run("ISBNdb search", () => isbndbSearch(http, key!, store, query, 8))
         : NONE;
   const olSearched = !isbndbSearched.value.length && wants("openlibrary") ? await run("Open Library search", () => openLibrarySearch(http, query)) : NONE;
   // Papers and DOI books live in Crossref; skip it for plain book searches when the user picked OL.
@@ -237,14 +236,12 @@ function requireVisible(deps: Pick<AppContext, "db" | "library">, id: number): B
   return book;
 }
 
-/** Candidates with the remembered main spelling of names (like imports), each compared with the book. */
-export function withDiffs(deps: Pick<AppContext, "aliases">, book: BookRecord, candidates: readonly MetadataCandidate[], errors: readonly string[] = []): LookupResult {
+/** Candidates, each compared with the book. */
+export function withDiffs(book: BookRecord, candidates: readonly MetadataCandidate[], errors: readonly string[] = []): LookupResult {
   return {
     bookId: book.id,
     notes: book.notes,
-    candidates: candidates
-      .map((c) => ({ ...c, metadata: deps.aliases.apply(applyRules(c.metadata)) }))
-      .map((c) => ({ ...c, diff: diffMetadata(book, c.metadata) })),
+    candidates: candidates.map((c) => ({ ...c, diff: diffMetadata(book, c.metadata) })),
     errors,
   };
 }
@@ -253,7 +250,7 @@ export function withDiffs(deps: Pick<AppContext, "aliases">, book: BookRecord, c
 export async function find(deps: ViewDeps & SourceDeps, bookId: number, opts: LookupOptions = {}): Promise<LookupResult> {
   const book = requireVisible(deps, bookId);
   const { candidates, errors } = await findCandidates(deps, book, opts);
-  return withDiffs(deps, book, candidates, errors);
+  return withDiffs(book, candidates, errors);
 }
 
 /** The review queue: books on disk with their stored candidates, oldest first. */
@@ -265,7 +262,7 @@ export function reviewItems(deps: ViewDeps): ReviewItemDto[] {
     .filter((r) => library.index.hasBook(r.bookId) && records.has(r.bookId))
     .map((r) => {
       const book = records.get(r.bookId)!;
-      return { book: toSummary(book, library.index.filesOfBook(book.id)), result: withDiffs(deps, book, r.candidates), createdAt: r.createdAt };
+      return { book: toSummary(book, library.index.filesOfBook(book.id)), result: withDiffs(book, r.candidates), createdAt: r.createdAt };
     });
 }
 
@@ -311,7 +308,7 @@ export async function apply(deps: ApplyDeps, bookId: number, req: ApplyMetadataR
     ...(c.source === "openlibrary" && c.match !== "search" ? { olEditionKey: c.olEditionKey, olWorkKey: c.olWorkKey } : {}),
     ...(c.source === "openlibrary" && c.match === "search" ? { olWorkKey: c.olWorkKey } : {}),
   });
-  const coverSaved = !!cover && (await coverStore.save(deps.config.coversDir, bookId, { data: cover, mime: "image/jpeg" }));
+  const coverSaved = !!cover && (await coverStore.save(deps.config.coversDir, bookId, { data: cover }));
   if (coverSaved) bookRepo.setHasCover(deps.db, bookId, true, c.source);
   dismiss(deps, bookId);
   deps.events.libraryChanged([bookId]);
@@ -374,7 +371,7 @@ export async function setCoverFromUrl(deps: Pick<AppContext, "db" | "library" | 
   if (typeof coverUrl !== "string" || !coverUrl) throw new ValidationError("Missing cover URL");
   const data = await downloadCover(deps, coverUrl);
   if (!data) throw new ValidationError("Open Library has no image for this cover");
-  if (!(await coverStore.save(deps.config.coversDir, bookId, { data, mime: "image/jpeg" }))) throw new ValidationError("The image could not be read");
+  if (!(await coverStore.save(deps.config.coversDir, bookId, { data }))) throw new ValidationError("The image could not be read");
   bookRepo.setHasCover(deps.db, bookId, true, "openlibrary");
   bookRepo.confirm(deps.db, bookId, "manual");
   deps.events.libraryChanged([bookId]);

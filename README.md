@@ -5,25 +5,25 @@ reads their metadata, finds what's missing online, and keeps the filenames tidy.
 (described in [docs/api.md](docs/api.md)); there is no web interface (yet).
 
 **Your folder is the library.** Each folder directly inside it is a bookshelf, and books lying in the top folder are
-*Unshelved*. Bookshelf never hides your files away: copy a book into the folder and it shows up, delete one in your file
-manager and it's gone. What Bookshelf adds — titles, authors, tags, series, ratings, notes, covers — is kept separately,
+*Unshelved*. Bookshelf never hides your files away: copy a book into the folder or delete one in your file manager, and
+the next scan sees it. What Bookshelf adds — titles, authors, tags, series, ratings, notes, covers — is kept separately,
 so your files stay as they are.
 
 ## What it does
 
-- Reads EPUB, PDF, CBZ, CBR, DJVU and FB2 (`.fb2`, `.fb2.zip`, `.fbz`).
+- Reads EPUB, PDF, CBZ, CBR and DJVU.
 - Takes each book's title, authors, ISBN or DOI and other details from the file itself, or from its filename when the
-  file has none.
+  file has none and the name is in Bookshelf's own style.
 - Treats the EPUB and the PDF of the same book as one book with two files.
-- Notices files you add, move, rename or remove outside Bookshelf, as it happens.
+- Scans the folder when it starts and whenever you ask (`POST /api/library/rescan`), to pick up files you added, moved,
+  renamed or removed yourself.
 - Imports new books into a shelf, refuses duplicates, and names them `Author - Title [ISBN or DOI].ext`.
 - Searches titles, authors, series, tags, descriptions, ISBNs and DOIs, with filters (format, tag, series, author, rating,
   missing data…) and sorting.
-- Lets you edit a book's details and cover, merge two entries into one or split one apart, move books between shelves,
-  delete them, and download their files.
+- Lets you edit a book's details and cover, move books between shelves, delete them, and download their files.
 - Looks books up in Open Library, Crossref and the other DOI registries, and in ISBNdb if you have an API key. You
   review each suggestion field by field before anything changes. Large batches go to a review queue.
-- Sends live updates over a WebSocket (`/ws`): changed books, scan and lookup progress.
+- Sends updates over a WebSocket (`/ws`): changed books, scan and lookup progress.
 
 ## Requirements
 
@@ -82,7 +82,7 @@ or by setting `library_root` in the config file. Bookshelf then scans the folder
 first time, and `/ws` reports the progress. Unlinking the folder (`{"libraryRoot": null}`) never deletes any files.
 
 If the folder disappears later (an unmounted drive, say), Bookshelf reports the library as unavailable and forgets
-nothing.
+nothing. Once it's back, ask for a rescan (`POST /api/library/rescan`) or restart Bookshelf.
 
 > **There is no login.** Bookshelf is meant for one person on a trusted network. Don't expose it to the internet
 > without an authenticating reverse proxy in front of it (one that also forwards the `/ws` WebSocket).
@@ -135,31 +135,29 @@ Import a book into a shelf through the API, or copy it into the library folder. 
 or the same ISBN or DOI in the same format, is already there; a new format of a book you have joins its other files.
 You can ask for an imported book to be looked up straight away, with the results waiting in the review queue.
 
-Files you copy in yourself keep their names until you ask Bookshelf to rename them, one book or a whole shelf at a time.
+Files you copy in yourself appear after the next scan (`POST /api/library/rescan`, or a restart). They keep their names
+until you ask Bookshelf to rename them.
 
 ### Filenames
 
-Bookshelf reads details from filenames like these:
+Bookshelf names files `Author - Title [9780131103627].epub`: several authors appear as `A & B - Title` or
+`A et al. - Title`, a book without authors as `Unknown - Title`, and ` (2)` is added when two names would collide. A DOI
+is written with `_` in place of `/`, since filenames can't contain `/`.
 
-- `Title -- Author, Other Author -- anything else isbn13 9780131103627 doi 10.1145_3290605.3300857`: the style used
-  by Anna's Archive. Authors can be separated by `,`, `;`, `&` or `and`, and `Last, First` is understood. DOIs use `_`
-  instead of `/`, since filenames can't contain `/`.
-- `Author - Title [9780131103627].epub`: the style Bookshelf names files in. Several authors appear as
-  `A & B - Title` or `A et al. - Title`, and ` (2)` is added when two names would collide.
-- `Title - Author`, common in downloads: Bookshelf works out which side is the author and which the title. When it
-  can't tell, it assumes `Author - Title`.
+That is the only style it reads details from, and only for what the file itself doesn't say. The part before the first
+` - ` is always the author. Any other filename is taken as the title, as it is, with no author.
 
-Some files have the title and author swapped in their own metadata. Bookshelf can list the books that look the wrong
-way round and suggest a fix you can adjust before applying.
+What a file says about itself is taken as it is, too: a PDF whose metadata says its title is "untitled" is listed as
+"untitled" until you edit it or accept a lookup.
 
 ### Editing
 
 Changing a book's title, authors, ISBN or DOI renames its files to match. The contents of your files are never changed:
 covers, tags and other details live only in Bookshelf.
 
-Some publishers put details in the wrong place (Delphi Classics, for example, files "Parts Edition 3 of 12" as a tag
-instead of a series). Bookshelf fixes the ones it knows about when it reads them, and can apply those fixes to books
-already in the library.
+Covers are kept exactly as they came: from the book file, an upload, or a lookup. Only an image a browser can't show
+(BMP, TIFF, HEIC) is converted, to a PNG of the same size. For PDF and DJVU files, the cover is their first page,
+rendered about 1200 pixels tall.
 
 ### Looking up metadata
 
@@ -182,6 +180,9 @@ covers included, so you never pay twice for the same answer, and later lookups u
 Details you've confirmed — by accepting a lookup or editing anything yourself — are kept when a book's last file goes
 away, and come back if the file returns. Details that were only read from the file are dropped, since they can be read
 again. Renaming or moving files, inside Bookshelf or outside it, never loses anything.
+
+Files deleted outside Bookshelf are noticed at the next scan. A scan that finds no books at all keeps everything, since
+an empty folder more likely means an unmounted drive.
 
 ## Author and book reference data
 

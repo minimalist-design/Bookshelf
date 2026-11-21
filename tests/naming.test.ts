@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { formatEdition } from "../src/shared/edition.ts";
 import { authorsForFilename, splitAuthors, toDisplayName, toSortName } from "../src/server/naming/authors.ts";
 import { buildLibraryFilename, MAX_FILENAME_BYTES, withCollisionSuffix } from "../src/server/naming/buildFilename.ts";
-import { doiCandidatesFromFilename, doiFromFilename, doiToFilename, normalizeDoi } from "../src/server/naming/doi.ts";
+import { doiFromFilename, doiToFilename, normalizeDoi } from "../src/server/naming/doi.ts";
 import { detectFormat } from "../src/server/naming/formats.ts";
 import { isValidIsbn13, normalizeIsbn } from "../src/server/naming/isbn.ts";
 import { parseFilename } from "../src/server/naming/parseFilename.ts";
@@ -12,8 +12,6 @@ describe("detectFormat", () => {
   test.each([
     ["Book.epub", "epub", ".epub", "Book"],
     ["Book.PDF", "pdf", ".PDF", "Book"],
-    ["Book.fb2.zip", "fb2", ".fb2.zip", "Book"],
-    ["Book.fbz", "fb2", ".fbz", "Book"],
     ["Comic.cbz", "cbz", ".cbz", "Comic"],
     ["Comic.cbr", "cbr", ".cbr", "Comic"],
     ["Scan.djv", "djvu", ".djv", "Scan"],
@@ -25,6 +23,7 @@ describe("detectFormat", () => {
   test("unsupported", () => {
     expect(detectFormat("notes.txt")).toBeNull();
     expect(detectFormat("archive.zip")).toBeNull();
+    for (const fb2 of ["Book.fb2", "Book.fb2.zip", "Book.fbz"]) expect(detectFormat(fb2)).toBeNull();
     expect(detectFormat(".epub")).toBeNull();
   });
 });
@@ -61,10 +60,6 @@ describe("DOI", () => {
     expect(doiFromFilename("10.1007_978-3-540_x")).toBe("10.1007/978-3-540_x");
     expect(doiFromFilename("10.1000/already")).toBe("10.1000/already");
     expect(doiFromFilename("11.1000_x")).toBeNull();
-  });
-  test("candidates for ambiguous suffixes", () => {
-    expect(doiCandidatesFromFilename("10.1093_ajae_aaq063")).toEqual(["10.1093/ajae_aaq063", "10.1093/ajae/aaq063"]);
-    expect(doiCandidatesFromFilename("10.1000_xyz")).toEqual(["10.1000/xyz"]);
   });
 });
 
@@ -110,140 +105,52 @@ describe("authors", () => {
   });
 });
 
-describe("parseFilename: import pattern", () => {
-  test("title and author", () => {
-    const p = parseFilename("The C Programming Language -- Brian W. Kernighan, Dennis M. Ritchie.pdf");
-    expect(p.pattern).toBe("import");
-    expect(p.title).toBe("The C Programming Language");
-    expect(p.authors).toEqual(["Brian W. Kernighan", "Dennis M. Ritchie"]);
-    expect(p.isbn13).toBeNull();
-    expect(p.doi).toBeNull();
-  });
-
-  test("isbn13 and doi tokens anywhere", () => {
-    const p = parseFilename("Title -- Author -- isbn13 9780131103627 -- doi 10.1000_xyz123.epub");
-    expect(p.title).toBe("Title");
-    expect(p.authors).toEqual(["Author"]);
-    expect(p.isbn13).toBe("9780131103627");
-    expect(p.isbn13Valid).toBe(true);
-    expect(p.doi).toBe("10.1000/xyz123");
-    expect(p.doiToken).toBe("10.1000_xyz123");
-  });
-
-  test("Anna's Archive style with extra segments", () => {
-    const p = parseFilename(
-      "Structure and Interpretation of Computer Programs -- Abelson, Harold; Sussman, Gerald Jay -- 2, 1996 -- MIT Press -- isbn13 9780262510875 -- 0c9a4b1d2e3f4a5b6c7d8e9f0a1b2c3d -- Anna’s Archive.pdf",
-    );
-    expect(p.title).toBe("Structure and Interpretation of Computer Programs");
-    expect(p.authors).toEqual(["Harold Abelson", "Gerald Jay Sussman"]);
-    expect(p.isbn13).toBe("9780262510875");
-  });
-
-  test("token inside the author segment", () => {
-    const p = parseFilename("Title -- Author Name isbn13 978-0-13-110362-7.pdf");
-    expect(p.authors).toEqual(["Author Name"]);
-    expect(p.isbn13).toBe("9780131103627");
-  });
-
-  test("ID-only second segment means no author", () => {
-    const p = parseFilename("Some Paper -- doi 10.1145_3290605.pdf");
-    expect(p.title).toBe("Some Paper");
-    expect(p.authors).toEqual([]);
-    expect(p.doi).toBe("10.1145/3290605");
-  });
-
-  test("invalid ISBN checksum is kept but flagged", () => {
-    const p = parseFilename("T -- A -- isbn13 9780131103628.epub");
-    expect(p.isbn13).toBe("9780131103628");
-    expect(p.isbn13Valid).toBe(false);
-  });
-
-  test("title containing a single hyphen", () => {
-    const p = parseFilename("Foo - The Sequel -- Jane Doe.epub");
-    expect(p.title).toBe("Foo - The Sequel");
-    expect(p.authors).toEqual(["Jane Doe"]);
-  });
-});
-
-describe("parseFilename: import pattern order", () => {
-  test("segments are swapped only when the first is clearly a name and the second clearly a title", () => {
-    expect(parseFilename("Brian W. Kernighan -- The C Programming Language.pdf")).toMatchObject({
-      title: "The C Programming Language",
-      authors: ["Brian W. Kernighan"],
-    });
-    expect(parseFilename("Jane Doe -- Emma.epub")).toMatchObject({ title: "Jane Doe", authors: ["Emma"] });
-  });
-});
-
-describe("parseFilename: library pattern", () => {
+describe("parseFilename: Bookshelf's own style", () => {
   test("with ISBN", () => {
     const p = parseFilename("Brian W. Kernighan & Dennis M. Ritchie - The C Programming Language [9780131103627].pdf");
-    expect(p.pattern).toBe("library");
-    expect(p.authors).toEqual(["Brian W. Kernighan", "Dennis M. Ritchie"]);
-    expect(p.title).toBe("The C Programming Language");
-    expect(p.isbn13).toBe("9780131103627");
+    expect(p).toEqual({
+      pattern: "library",
+      authors: ["Brian W. Kernighan", "Dennis M. Ritchie"],
+      title: "The C Programming Language",
+      isbn13: "9780131103627",
+      doi: null,
+    });
   });
 
   test("with DOI and collision counter", () => {
     const p = parseFilename("Jane Doe et al. - A Study - Part 2 [10.1000_xyz] (2).pdf");
-    expect(p.authors).toEqual(["Jane Doe"]);
-    expect(p.title).toBe("A Study - Part 2");
-    expect(p.doi).toBe("10.1000/xyz");
+    expect(p).toMatchObject({ authors: ["Jane Doe"], title: "A Study - Part 2", isbn13: null, doi: "10.1000/xyz" });
   });
 
   test("without ID; brackets that are not IDs stay in the title", () => {
-    expect(parseFilename("Jane Austen - Emma.epub")).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
+    expect(parseFilename("Jane Austen - Emma.epub")).toMatchObject({ pattern: "library", title: "Emma", authors: ["Jane Austen"] });
     expect(parseFilename("Jane Austen - Emma [Illustrated].epub").title).toBe("Emma [Illustrated]");
-    expect(parseFilename("Unknown - Mystery.epub").authors).toEqual([]);
+    expect(parseFilename("Jane Austen - Emma (2).epub").title).toBe("Emma (2)"); // a counter only follows an ID
+    expect(parseFilename("Unknown - Mystery.epub")).toMatchObject({ title: "Mystery", authors: [] });
   });
 
-  test("“Title - Author” is read the right way round", () => {
-    expect(parseFilename("A gentle introduction to category theory T - Fokkinga M M.pdf")).toMatchObject({
-      pattern: "library",
-      title: "A gentle introduction to category theory T",
-      authors: ["M. M. Fokkinga"],
-    });
-    expect(parseFilename("Pride and Prejudice - Jane Austen.epub")).toMatchObject({ title: "Pride and Prejudice", authors: ["Jane Austen"] });
-    expect(parseFilename("The Republic - Plato.epub")).toMatchObject({ title: "The Republic", authors: ["Plato"] });
-    expect(parseFilename("The C Programming Language - Brian W. Kernighan, Dennis M. Ritchie.pdf")).toMatchObject({
-      title: "The C Programming Language",
-      authors: ["Brian W. Kernighan", "Dennis M. Ritchie"],
-    });
-    expect(parseFilename("Mystery - Unknown.epub")).toMatchObject({ title: "Mystery", authors: [] });
+  test("always read author first: nothing is guessed from the shape of the names", () => {
+    expect(parseFilename("The Republic - Plato.epub")).toMatchObject({ title: "Plato", authors: ["The Republic"] });
+    expect(parseFilename("Mystery - Unknown.epub")).toMatchObject({ title: "Unknown", authors: ["Mystery"] });
   });
 
-  test("the split falls at the ` - ` that leaves a person's name on one side", () => {
-    expect(parseFilename("Dune - Part One - Frank Herbert.epub")).toMatchObject({ title: "Dune - Part One", authors: ["Frank Herbert"] });
-    expect(parseFilename("Frank Herbert - Dune - Part One.epub")).toMatchObject({ title: "Dune - Part One", authors: ["Frank Herbert"] });
+  test("names written by buildLibraryFilename read back", () => {
+    const meta = { title: "The C Programming Language", authors: ["Brian W. Kernighan", "Dennis M. Ritchie"], isbn13: "9780131103627" };
+    expect(parseFilename(buildLibraryFilename(meta, ".pdf"))).toMatchObject(meta);
+    const paper = { title: "Attention Is All You Need", authors: ["Ashish Vaswani"], doi: "10.48550/arXiv.1706.03762" };
+    expect(parseFilename(buildLibraryFilename(paper, ".pdf"))).toMatchObject(paper);
+    expect(parseFilename(buildLibraryFilename({ title: "Anonymous Work", authors: [] }, ".epub"))).toMatchObject({ title: "Anonymous Work", authors: [] });
   });
+});
 
-  test("the app's order is kept when the names don't say, or when the name has an ID", () => {
-    expect(parseFilename("Plato - The Republic.epub")).toMatchObject({ title: "The Republic", authors: ["Plato"] });
-    expect(parseFilename("Emma - Jane Austen.epub")).toMatchObject({ title: "Jane Austen", authors: ["Emma"] }); // can't tell
-    expect(parseFilename("The Long Road - Jane Doe [9780131103627].epub")).toMatchObject({ title: "Jane Doe", authors: ["The Long Road"] });
-  });
-
-  test("a known author settles names the shapes can't", () => {
-    const known = (n: string) => n === "Jane Austen";
-    expect(parseFilename("Emma - Jane Austen.epub", { isKnownAuthor: known })).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
-    expect(parseFilename("Jane Austen - Emma.epub", { isKnownAuthor: known })).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
-    // A title stored as an author (an earlier mix-up) doesn't make a title read as a name.
-    const swapped = (n: string) => n === "A gentle introduction to category theory T";
-    expect(parseFilename("A gentle introduction to category theory T - Fokkinga M M.pdf", { isKnownAuthor: swapped }).title).toBe(
-      "A gentle introduction to category theory T",
-    );
-    const split = (n: string) => n === "Pride" || n === "Prejudice"; // "Pride and Prejudice" once stored as two authors
-    expect(parseFilename("Pride and Prejudice - Jane Austen.epub", { isKnownAuthor: split }).title).toBe("Pride and Prejudice");
-  });
-
-  test("all-lowercase and all-capitals names are judged by their words, not their case", () => {
-    expect(parseFilename("pride and prejudice - jane austen.epub")).toMatchObject({ title: "pride and prejudice", authors: ["jane austen"] });
-    expect(parseFilename("PRIDE AND PREJUDICE - JANE AUSTEN.epub")).toMatchObject({ title: "PRIDE AND PREJUDICE", authors: ["JANE AUSTEN"] });
-    expect(parseFilename("jane austen - emma.epub")).toMatchObject({ title: "emma", authors: ["jane austen"] });
-  });
-
-  test("plain filenames become the title", () => {
-    expect(parseFilename("Moby Dick.epub")).toMatchObject({ pattern: "plain", title: "Moby Dick", authors: [] });
+describe("parseFilename: any other name", () => {
+  test.each([
+    "Moby Dick.epub",
+    "The C Programming Language -- Brian W. Kernighan, Dennis M. Ritchie.pdf",
+    "Title -- Author -- isbn13 9780131103627 -- doi 10.1000_xyz123.epub",
+    "Some Paper -- doi 10.1145_3290605.pdf",
+  ])("%s is only a title", (name) => {
+    expect(parseFilename(name)).toEqual({ pattern: "plain", title: detectFormat(name)!.stem, authors: [], isbn13: null, doi: null });
   });
 });
 

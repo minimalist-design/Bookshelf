@@ -1,5 +1,5 @@
 import { formatEdition } from "../../shared/edition.ts";
-import type { AuthorMatchDto, CandidateMetadata, CoverOption, MetadataCandidate } from "../../shared/types.ts";
+import type { CandidateMetadata, CoverOption, MetadataCandidate } from "../../shared/types.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import { RateLimitedError, type HttpClient } from "./http.ts";
 import { cleanSubjects, normalizeLanguage, parseLooseDate, parseSeries } from "./normalize.ts";
@@ -246,44 +246,5 @@ function editionCoverOptions(entries: readonly OlEditionEntry[], authors: readon
         thisEdition: false,
       };
       return ids.map((id): CoverOption => ({ coverUrl: olCoverUrl(id), ...option }));
-    });
-}
-
-interface OlAuthorDoc {
-  key?: string;
-  name?: string;
-  alternate_names?: string[];
-  birth_date?: string;
-  death_date?: string;
-  top_work?: string;
-  work_count?: number;
-}
-
-/** Authors matching a name, best known first, to pick a reference spelling. */
-export async function openLibraryAuthorSearch(http: HttpClient, q: string, limit = 5): Promise<AuthorMatchDto[]> {
-  const params = new URLSearchParams({
-    q,
-    limit: String(limit),
-    fields: "key,name,alternate_names,birth_date,death_date,top_work,work_count",
-  });
-  const res = await http.getJson<{ docs?: OlAuthorDoc[] }>(`${OL}/search/authors.json?${params}`);
-  const year = (d: string | undefined) => /\b(\d{3,4})\b/.exec(d ?? "")?.[1] ?? null;
-  return (res?.docs ?? [])
-    .filter((d): d is OlAuthorDoc & { key: string; name: string } => !!d.key && !!d.name?.trim())
-    .map((d) => {
-      const key = d.key.replace(/^\/authors\//, "");
-      const [born, died] = [year(d.birth_date), year(d.death_date)];
-      return {
-        source: "openlibrary" as const,
-        key,
-        name: d.name.replace(/\s+/g, " ").trim(),
-        years: born || died ? `${born ?? "?"}–${died ?? ""}` : null,
-        description: null,
-        topWork: d.top_work?.trim() || null,
-        workCount: d.work_count ?? null,
-        alternateNames: (d.alternate_names ?? []).slice(0, 5),
-        authorities: [],
-        url: `${OL}/authors/${key}`,
-      };
     });
 }

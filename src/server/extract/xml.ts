@@ -47,7 +47,7 @@ export function attr(node: unknown, name: string): string | undefined {
   return undefined;
 }
 
-/** Decode the bytes of an XML document honouring its declared encoding (FB2 is often windows-1251). */
+/** Decode the bytes of an XML document honouring its declared encoding. */
 export function decodeXml(bytes: Uint8Array): string {
   const head = new TextDecoder("latin1").decode(bytes.subarray(0, 200));
   const declared = /<\?xml[^>]*encoding=["']([\w.-]+)["']/i.exec(head)?.[1];

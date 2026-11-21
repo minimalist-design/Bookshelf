@@ -6,15 +6,13 @@ import { detectExternalTools } from "../src/server/config.ts";
 import { comicInfo, extractCbr, extractCbz, parseSevenZipListing } from "../src/server/extract/comic.ts";
 import { djvuMetaToRaw, extractDjvu, parseDjvuMeta } from "../src/server/extract/djvu.ts";
 import { extractEpub } from "../src/server/extract/epub.ts";
-import { extractFb2 } from "../src/server/extract/fb2.ts";
 import { createExtractor } from "../src/server/extract/index.ts";
-import { isJunkAuthor, isJunkTitle } from "../src/server/extract/junk.ts";
 import { mergeMetadata } from "../src/server/extract/merge.ts";
 import { extractPdf } from "../src/server/extract/pdf.ts";
 import { htmlToText, normalizeDate } from "../src/server/extract/text.ts";
 import { openZip, readEntryText } from "../src/server/extract/zip.ts";
 import { parseFilename } from "../src/server/naming/parseFilename.ts";
-import { makeEpub, makeFb2, makeJpeg, makePdf, makePng, makeZip, xmpPacket } from "./fixtures.ts";
+import { makeEpub, makeJpeg, makePdf, makePng, makeZip, xmpPacket } from "./fixtures.ts";
 
 const tools = detectExternalTools();
 const tmp = mkdtempSync(join(tmpdir(), "bookshelf-extract-"));
@@ -95,7 +93,6 @@ describe("EPUB", () => {
       seriesIndex: 2,
     });
     const c = await m.loadCover!();
-    expect(c!.mime).toBe("image/png");
     expect(await imageSize(c!.data)).toEqual([120, 180]);
   });
 
@@ -122,7 +119,7 @@ describe("EPUB", () => {
     const m = await extractEpub(p);
     expect(m).toMatchObject({ title: "Old Style", authors: ["Jane Austen"], isbn13: "9780131103627", series: "Novels", seriesIndex: 3.5 });
     expect(m.publishedDate).toBeUndefined();
-    expect((await m.loadCover!())!.mime).toBe("image/jpeg");
+    expect((await m.loadCover!())!.data.byteLength).toBeGreaterThan(0);
   });
 });
 
@@ -153,7 +150,6 @@ describe("PDF", () => {
   test.skipIf(!tools.pdftoppm)("cover rendered from the first page", async () => {
     const m = await extractPdf(write("c.pdf", makePdf({ info: { Title: "X" } })), tools.pdftoppm);
     const c = await m.loadCover!();
-    expect(c!.mime).toBe("image/jpeg");
     const [w, h] = await imageSize(c!.data);
     expect(h).toBe(1200);
     expect(w).toBe(800); // 200x300 page scaled to fit 1200
@@ -243,119 +239,47 @@ describe("DJVU", () => {
     const m = await extractDjvu(join(dir, "book.djvu"), tools);
     expect(m).toMatchObject({ title: "Ünïcode Djvu", authors: ["Jane Doe"], publishedDate: "1999", isbn13: "9780131103627", pages: 1 });
     const c = await m.loadCover!();
-    expect(c!.mime).toBe("image/jpeg");
     expect((await imageSize(c!.data))[0]).toBeGreaterThan(100);
   });
 });
 
-describe("FB2", () => {
-  const titleInfo = `
-    <genre>sf_fantasy</genre><genre>adventure</genre>
-    <author><first-name>Arkady</first-name><last-name>Strugatsky</last-name></author>
-    <author><first-name>Boris</first-name><middle-name>N.</middle-name><last-name>Strugatsky</last-name></author>
-    <book-title>Roadside Picnic</book-title>
-    <annotation><p>First paragraph.</p><p>Second <emphasis>one</emphasis>.</p></annotation>
-    <date value="1972-01-01">1972</date>
-    <lang>ru</lang>
-    <sequence name="Noon Universe" number="4"/>`;
-
-  test("plain FB2 with embedded cover", async () => {
-    const png = await makePng(33, 44);
-    const p = write("b.fb2", makeFb2({ titleInfo, publishInfo: "<publisher>Macmillan</publisher><year>1977</year><isbn>978-0-02-615170-3</isbn>", coverPng: png }));
-    const m = await extractFb2(p);
-    expect(m).toMatchObject({
-      title: "Roadside Picnic",
-      authors: ["Arkady Strugatsky", "Boris N. Strugatsky"],
-      tags: ["sf_fantasy", "adventure"],
-      description: "First paragraph.\n\nSecond one.",
-      language: "ru",
-      series: "Noon Universe",
-      seriesIndex: 4,
-      publisher: "Macmillan",
-      publishedDate: "1977",
-      isbn13: "9780026151703",
-    });
-    expect(await imageSize((await m.loadCover!())!.data)).toEqual([33, 44]);
-  });
-
-  test("zipped FB2", async () => {
-    const p = write("b.fb2.zip", makeZip({ "book.fb2": makeFb2({ titleInfo }) }));
-    expect((await extractFb2(p)).title).toBe("Roadside Picnic");
-  });
-
-  test("windows-1251 encoded FB2", async () => {
-    const xml = makeFb2({ titleInfo: "<book-title>Пикник на обочине</book-title>" }).replace('encoding="UTF-8"', 'encoding="windows-1251"');
-    // Encode to cp1251 by hand for the Cyrillic range used here.
-    const bytes = Uint8Array.from([...xml].map((ch) => {
-      const cp = ch.codePointAt(0)!;
-      if (cp < 0x80) return cp;
-      if (cp >= 0x410 && cp <= 0x44f) return cp - 0x410 + 0xc0;
-      throw new Error(`unmapped ${ch}`);
-    }));
-    expect((await extractFb2(write("cp1251.fb2", bytes))).title).toBe("Пикник на обочине");
-  });
-});
-
-describe("merge + junk", () => {
-  test("junk detection", () => {
-    for (const t of ["untitled", "Microsoft Word - thesis.docx", "Document1", "chapter1.tex", "0a1b2c3d4e5f6a7b8c9d", "123", ""]) {
-      expect(isJunkTitle(t)).toBe(true);
-    }
-    expect(isJunkTitle("Dune")).toBe(false);
-    expect(isJunkTitle("my_file", "my_file")).toBe(true);
-    expect(isJunkAuthor("Administrator")).toBe(true);
-    expect(isJunkAuthor("user123")).toBe(true);
-    expect(isJunkAuthor("Frank Herbert")).toBe(false);
-  });
-
-  test("field-level merge: embedded wins unless junk; filename IDs always win", () => {
-    const parsed = parseFilename("Real Title -- Real Author -- isbn13 9780441172719.pdf");
+describe("merge", () => {
+  test("embedded values are taken as they are; the filename fills gaps; IDs in a Bookshelf-style name win", () => {
+    const parsed = parseFilename("Real Author - Real Title [9780441172719].pdf");
     const r = mergeMetadata(
       { title: "Microsoft Word - draft.docx", authors: ["Administrator"], isbn13: "9780131103627", publisher: "Pub", tags: ["a", "A", "b"] },
       parsed,
-      "Real Title -- Real Author -- isbn13 9780441172719",
+      "Real Author - Real Title [9780441172719]",
     );
-    expect(r.metadata).toMatchObject({ title: "Real Title", authors: ["Real Author"], isbn13: "9780441172719", publisher: "Pub", tags: ["a", "b"] });
+    expect(r.metadata).toMatchObject({ title: "Microsoft Word - draft.docx", authors: ["Administrator"], isbn13: "9780441172719", publisher: "Pub", tags: ["a", "b"] });
     expect(r.source).toBe("mixed");
 
     const r2 = mergeMetadata({ title: "Embedded", authors: ["Kernighan, Brian W.; Ritchie, Dennis M."] }, parseFilename("whatever.epub"), "whatever");
     expect(r2.metadata).toMatchObject({ title: "Embedded", authors: ["Brian W. Kernighan", "Dennis M. Ritchie"] });
     expect(r2.source).toBe("embedded");
 
-    // Title equal to a plain filename is kept (with its proper casing); equal to a structured one is junk.
+    // A title equal to the filename is kept.
     expect(mergeMetadata({ title: "Dune" }, parseFilename("dune.epub"), "dune").metadata.title).toBe("Dune");
-    expect(mergeMetadata({ title: "Dune -- Frank Herbert" }, parseFilename("Dune -- Frank Herbert.pdf"), "Dune -- Frank Herbert").metadata.title).toBe("Dune");
 
-    const r3 = mergeMetadata({}, parseFilename("Only -- Filename.epub"), "Only -- Filename");
-    expect(r3.source).toBe("filename");
+    const own = mergeMetadata({}, parseFilename("Filename Author - Only Title.epub"), "Filename Author - Only Title");
+    expect(own.metadata).toMatchObject({ title: "Only Title", authors: ["Filename Author"] });
+    expect(own.source).toBe("filename");
+
+    // Any other name is only a title: nothing is guessed from it.
+    const plain = mergeMetadata({}, parseFilename("Only -- Filename -- isbn13 9780441172719.epub"), "Only -- Filename -- isbn13 9780441172719");
+    expect(plain.metadata).toMatchObject({ title: "Only -- Filename -- isbn13 9780441172719", authors: [], isbn13: null });
+    expect(plain.source).toBe("filename");
   });
 
-  test("swapped or copied embedded title and author are put right", () => {
-    // Swapped in the file: the author reads as a title, the title as a name.
+  test("swapped or copied embedded title and author are left as they are", () => {
     const swapped = mergeMetadata(
       { title: "Fokkinga M M", authors: ["A gentle introduction to category theory T"] },
       parseFilename("paper.pdf"),
       "paper",
     );
-    expect(swapped.metadata).toMatchObject({ title: "A gentle introduction to category theory T", authors: ["M. M. Fokkinga"] });
-
-    // The title copied into Author (or the filename into it) is no author at all.
+    expect(swapped.metadata).toMatchObject({ title: "Fokkinga M M", authors: ["A gentle introduction to category theory T"] });
     const copied = mergeMetadata({ title: "Category Theory Notes", authors: ["Category Theory Notes"] }, parseFilename("notes.pdf"), "notes");
-    expect(copied.metadata.authors).toEqual([]);
-    const stem = mergeMetadata({ title: "Notes", authors: ["scan_0042"] }, parseFilename("scan_0042.pdf"), "scan_0042");
-    expect(stem.metadata.authors).toEqual([]);
-
-    // A title-like author gives way to a name from the filename; so does a title that is that name.
-    const fromName = mergeMetadata(
-      { title: "Jane Doe", authors: ["The Long Road Home"] },
-      parseFilename("The Long Road Home -- Jane Doe.epub"),
-      "The Long Road Home -- Jane Doe",
-    );
-    expect(fromName.metadata).toMatchObject({ title: "The Long Road Home", authors: ["Jane Doe"] });
-
-    // Ordinary embedded metadata is left alone.
-    const fine = mergeMetadata({ title: "Emma", authors: ["Jane Austen"] }, parseFilename("Emma - Jane Austen.epub"), "Emma - Jane Austen");
-    expect(fine.metadata).toMatchObject({ title: "Emma", authors: ["Jane Austen"] });
+    expect(copied.metadata.authors).toEqual(["Category Theory Notes"]);
   });
 
   test("text helpers", () => {

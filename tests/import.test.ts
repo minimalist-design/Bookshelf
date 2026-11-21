@@ -5,7 +5,7 @@ import { apiRoutes } from "../src/server/api/router.ts";
 import type { AppContext } from "../src/server/app.ts";
 import { ValidationError } from "../src/server/library/paths.ts";
 import { listLibrary } from "../src/server/library/queries.ts";
-import { closeTestApp, FAST_LIBRARY, makeEpub, makePdf, makePng, scratchDir, testApp } from "./fixtures.ts";
+import { closeTestApp, makeEpub, makePdf, makePng, scratchDir, testApp } from "./fixtures.ts";
 import * as bookRepo from "../src/server/db/repo/books.ts";
 
 let tmp: string;
@@ -45,11 +45,17 @@ describe("import", () => {
     expect(incomingEmpty()).toBe(true);
   });
 
-  test("filename pattern metadata, uppercase extension normalized, Unshelved", async () => {
-    const r = await upload(makePdf(), "Attention Is All You Need -- Vaswani, Ashish; Shazeer, Noam; Parmar, Niki -- doi 10.48550_arXiv.1706.03762.PDF", null);
+  test("Bookshelf-style filename metadata, uppercase extension normalized, Unshelved", async () => {
+    const r = await upload(makePdf(), "Ashish Vaswani & Noam Shazeer - Attention Is All You Need [10.48550_arXiv.1706.03762].PDF", null);
     expect(r.status).toBe("imported");
-    expect(r.relPath).toBe("Ashish Vaswani et al. - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
-    expect(bookRepo.get(app.db, r.bookId)).toMatchObject({ doi: "10.48550/arXiv.1706.03762", authors: ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"] });
+    expect(r.relPath).toBe("Ashish Vaswani & Noam Shazeer - Attention Is All You Need [10.48550_arXiv.1706.03762].pdf");
+    expect(bookRepo.get(app.db, r.bookId)).toMatchObject({ doi: "10.48550/arXiv.1706.03762", authors: ["Ashish Vaswani", "Noam Shazeer"] });
+  });
+
+  test("any other filename gives only a title", async () => {
+    const r = await upload(makePdf(), "Attention Is All You Need -- Vaswani, Ashish -- doi 10.48550_arXiv.1706.03762.pdf", null);
+    expect(r.relPath).toBe("Unknown - Attention Is All You Need - Vaswani, Ashish - doi 10.48550_arXiv.1706.03762.pdf"); // " -- " is a separator, so it's written as " - "
+    expect(bookRepo.get(app.db, r.bookId)).toMatchObject({ title: "Attention Is All You Need -- Vaswani, Ashish -- doi 10.48550_arXiv.1706.03762", authors: [], doi: null });
   });
 
   test("exact duplicate is rejected and nothing is written", async () => {
@@ -84,7 +90,7 @@ describe("import", () => {
     const first = await upload(data, "a.epub", "Fiction");
     app.db.query("UPDATE books SET confirmed_source = 'openlibrary', title = 'Dune (verified)' WHERE id = ?").run(first.bookId);
     rmSync(join(root, first.relPath!));
-    await Bun.sleep(FAST_LIBRARY.graceMs + 300);
+    await app.library.rescan();
     expect(bookRepo.exists(app.db, first.bookId)).toBe(true);
     expect(books()).toHaveLength(0);
 
@@ -93,7 +99,7 @@ describe("import", () => {
     expect(again.relPath).toBe("Science/Frank Herbert - Dune (verified) [9780441172719].epub");
 
     rmSync(join(root, again.relPath!));
-    await Bun.sleep(FAST_LIBRARY.graceMs + 300);
+    await app.library.rescan();
     const byId = await upload(makePdf({ info: { Keywords: "ISBN 9780441172719" } }), "other.pdf", "Fiction");
     expect(byId).toMatchObject({ status: "reconnected", bookId: first.bookId, shelf: "Fiction" });
   });
@@ -117,10 +123,10 @@ describe("import", () => {
     expect(books()).toHaveLength(2);
   });
 
-  test("watcher does not process imported files a second time", async () => {
+  test("a rescan does not process imported files a second time", async () => {
     await upload(await epub("Dune", ["Frank Herbert"], "9780441172719"), "a.epub", "Fiction");
-    await upload(makePdf(), "Paper -- Someone.pdf", "Science");
-    await Bun.sleep(600);
+    await upload(makePdf(), "Someone - Paper.pdf", "Science");
+    await app.library.rescan();
     expect(app.library.index.size).toBe(2);
     expect(bookRepo.count(app.db)).toBe(2);
   });

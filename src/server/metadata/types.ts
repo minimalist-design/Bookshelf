@@ -18,12 +18,12 @@ export interface BookMetadata {
   readonly tags: readonly string[];
 }
 
+/** A cover image's bytes, in whatever format they came; the cover store identifies it. */
 export interface CoverImage {
   readonly data: Uint8Array;
-  readonly mime: string;
 }
 
-/** What an extractor found embedded in a file. Every field optional; values may still be junk. */
+/** What an extractor found embedded in a file. Every field optional. */
 export type RawMetadata = Partial<Omit<BookMetadata, "authors" | "tags">> & {
   authors?: string[];
   tags?: string[];

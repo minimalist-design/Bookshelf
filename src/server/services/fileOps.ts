@@ -9,7 +9,7 @@ import { withCollisionSuffix } from "../naming/buildFilename.ts";
 
 /**
  * Move a file, falling back to copy + unlink across filesystems (a shelf may be a mount point).
- * Synchronous on purpose: callers update the index before the watcher can react.
+ * Synchronous on purpose: callers update the index before a scan can run in between.
  */
 export function moveFileSync(from: string, to: string): Stats {
   try {

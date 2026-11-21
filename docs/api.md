@@ -31,7 +31,7 @@ A library root set in the config file (`library_root`) can't be changed through 
 |---|---|---|---|
 | GET | `/api/library` | `q` (full text), `shelf` (name; empty = Unshelved; omitted = all), `format`, `tag`, `series`, `author`, `confirmed` (`true`/`false`), `missing` (`id`, `author`, `cover`, `description`), `minRating`, `sort` (`title`, `author`, `added`, `year`, `series`, `rating`), `order` (`asc`/`desc`), `page`, `size` | *LibraryPage* of *BookSummaryDto* |
 | GET | `/api/library/status` | | *LibraryStatus* |
-| POST | `/api/library/rescan` | | `202` *LibraryStatus* |
+| POST | `/api/library/rescan` | | `202` *LibraryStatus*; picks up files added, moved or removed outside Bookshelf (also done at startup and when the library root changes) |
 | GET | `/api/facets` | | *LibraryFacets*: authors, tags, series, publishers, languages and formats with counts |
 | GET | `/api/shelves` | | *ShelfDto*[] (folders directly in the library root) |
 | POST | `/api/shelves` | `{name}` | `201` *ShelfDto*; creates the folder |
@@ -49,17 +49,15 @@ A library root set in the config file (`library_root`) can't be changed through 
 | POST | `/api/books/move` | `{ids, shelf}` (`shelf: null` = Unshelved) | *MoveResult* |
 | POST | `/api/books/normalize-filenames` | `{ids}` | *BulkRenameResult*: files renamed `Author - Title [ID].ext` |
 | POST | `/api/books/:id/normalize-filename` | | *BulkRenameResult* |
-| POST | `/api/books/:id/merge` | `{intoId}` | *BookActionResult*: `:id`'s files join `intoId` |
 | GET, HEAD | `/api/books/:id/files/:hash` | `download` (any value: attachment instead of inline) | the file, with byte ranges and ETag |
 | DELETE | `/api/books/:id/files/:hash` | | *DeleteResult*; deletes that file |
-| POST | `/api/books/:id/files/:hash/detach` | | *BookActionResult*: the file becomes a book of its own |
 
 ## Covers
 
 | Method | Path | Body / query | Response |
 |---|---|---|---|
-| GET | `/api/books/:id/cover` | `size` (`thumb`, default: WebP ≤320×480; `full`: JPEG ≤1200×1800) | the image, with ETag; `404` without a cover |
-| PUT | `/api/books/:id/cover` | raw image bytes (max 50 MB) | *BookDetailDto* |
+| GET | `/api/books/:id/cover` | | the image as stored (JPEG, PNG, WebP, GIF or AVIF), with ETag; `404` without a cover |
+| PUT | `/api/books/:id/cover` | raw image bytes (max 50 MB); kept as sent, except BMP, TIFF and HEIC, which become PNG at the same size | *BookDetailDto* |
 | DELETE | `/api/books/:id/cover` | | *BookDetailDto* |
 | POST | `/api/books/:id/cover/from-url` | `{url}` | *BookDetailDto* |
 | GET | `/api/lookup/:id/covers` | `q` (optional search text) | *CoverSearchResult*: covers offered by the metadata services |
@@ -87,33 +85,6 @@ Accepted extensions: `SUPPORTED_EXTENSIONS` in `src/shared/types.ts`.
 | POST | `/api/review-queue/accept-fills` | | `{applied, skipped, errors}`: applies every result that only fills empty fields |
 | DELETE | `/api/review-queue/:id` | | *LookupQueueStatus* |
 
-## Name cleanup
-
-`field` is one of `authors`, `tags`, `series`, `publishers`.
-
-| Method | Path | Body / query | Response |
-|---|---|---|---|
-| GET | `/api/cleanup/groups` | `field` | *NameGroupsDto*: spelling variants that look like one name |
-| GET | `/api/cleanup/books` | `field`, `name` | *BookRefDto*[] |
-| POST | `/api/cleanup/merge` | *NameMergeRequest*: `{field, from, to}` | *NameMergeResult*; remembers the alias |
-| GET | `/api/cleanup/aliases` | | *AliasDto*[] |
-| DELETE | `/api/cleanup/aliases` | `{field, variant}` | *AliasDto*[] |
-| GET | `/api/cleanup/author-search` | `q`, `source` (`wikidata`, `openlibrary`) | *AuthorSearchDto* |
-| GET | `/api/cleanup/swaps` | | *SwapSuspectDto*[]: books whose title and author look swapped |
-| POST | `/api/cleanup/swaps` | *TitleAuthorFixRequest*: `{items}` | *NameMergeResult* |
-
-## Maintenance
-
-| Method | Path | Body / query | Response |
-|---|---|---|---|
-| GET | `/api/maintenance/stats` | | *MaintenanceStats* |
-| GET | `/api/maintenance/missing` | | *MissingBookDto*[]: metadata kept for books whose files are gone |
-| POST | `/api/maintenance/missing` | `{ids}` | *CleanupResult*; forgets (deletes) that metadata |
-| POST | `/api/maintenance/cleanup` | | *CleanupResult*: orphaned covers and temp files removed |
-| POST | `/api/maintenance/rules` | | *MetadataRulesResult*: built-in metadata rules applied to every book |
-| POST | `/api/maintenance/normalize` | `{shelf?}` (name, `""` = Unshelved, omitted/`null` = all) | *BulkRenameResult* |
-| DELETE | `/api/maintenance/http-cache` | | `{removed}`: cached metadata responses dropped |
-
 ## Reference data
 
 See [reference-data-format.md](reference-data-format.md).
@@ -132,5 +103,5 @@ A WebSocket that only sends: each message is one JSON *ServerEvent*.
 | `type` | Payload | When |
 |---|---|---|
 | `library.status` | `status`: *LibraryStatus* | on connect, and when scanning starts, progresses or ends |
-| `library.changed` | `bookIds` | books were added, changed or removed (on disk or through the API) |
+| `library.changed` | `bookIds` | books were added, changed or removed (found by a scan, or through the API) |
 | `lookup.status` | `status`: *LookupQueueStatus* | bulk lookup progress |

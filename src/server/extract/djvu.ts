@@ -47,7 +47,7 @@ export async function extractDjvu(path: string, tools: ExternalTools): Promise<R
             const r = await run([ddjvu, "-format=ppm", "-page=1", "-size=1200x1800", path, "-"], 60_000);
             if (r.exitCode !== 0) return null;
             const jpeg = await ppmToJpeg(r.stdout);
-            return jpeg ? cover(jpeg, "image/jpeg") : null;
+            return jpeg ? cover(jpeg) : null;
           },
         }
       : {}),

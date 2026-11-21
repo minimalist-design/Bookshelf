@@ -41,7 +41,7 @@ export function updateSettings(app: AppContext, update: SettingsUpdate): Setting
     const changed = root !== settingsRepo.get(app.db, "libraryRoot");
     settingsRepo.set(app.db, "libraryRoot", root);
     // Re-index in the background; clients follow progress via library.status events.
-    // With no root, open() only stops watching and clears the in-memory index.
+    // With no root, open() only clears the in-memory index.
     if (changed) app.library.open(root).catch((err) => console.error("Library scan failed:", err));
   }
   if (update.contactEmail !== undefined) {

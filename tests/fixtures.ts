@@ -10,11 +10,6 @@ import { rgbToBmp } from "../src/server/covers/raster.ts";
 
 // ---- apps ---------------------------------------------------------------------------
 
-/** Library timings short enough for tests: the watcher reacts in about a tenth of a second. */
-export const FAST_LIBRARY = { debounceMs: 30, stableMs: 80, graceMs: 300 } as const;
-/** The same, but metadata of vanished files is kept while a test looks at it. */
-export const SLOW_RETENTION = { ...FAST_LIBRARY, graceMs: 60_000 } as const;
-
 /** A scratch directory holding `library/` (with the given shelves) and, once an app runs on it, `data/`. */
 export function scratchDir(name: string, shelves: readonly string[] = []): { tmp: string; root: string } {
   const tmp = mkdtempSync(join(tmpdir(), `bookshelf-${name}-`));
@@ -23,14 +18,14 @@ export function scratchDir(name: string, shelves: readonly string[] = []): { tmp
   return { tmp, root };
 }
 
-/** An app with its data in `<tmp>/data`, fast library timings unless `options.library` says otherwise. */
+/** An app with its data in `<tmp>/data`. */
 export function testApp(
   tmp: string,
   settings: ConfigFileSettings = {},
   options: CreateAppOptions = {},
   env?: Record<string, string | undefined>,
 ): AppContext {
-  return createApp(loadConfig({ data_dir: join(tmp, "data"), ...settings }, env), { ...options, library: { ...FAST_LIBRARY, ...options.library } });
+  return createApp(loadConfig({ data_dir: join(tmp, "data"), ...settings }, env), options);
 }
 
 /** Stop the app's background work and close it, then remove the scratch directory. */
@@ -59,6 +54,11 @@ function solid(width: number, height: number, { r, g, b }: Rgb): Uint8Array {
 
 export async function makePng(width = 60, height = 90, color: Rgb = { r: 200, g: 40, b: 40 }): Promise<Uint8Array> {
   return new Bun.Image(solid(width, height, color)).png().bytes();
+}
+
+/** BMP: a format browsers don't show, so the cover store converts it. */
+export function makeBmp(width = 60, height = 90, color: Rgb = { r: 40, g: 200, b: 40 }): Uint8Array {
+  return solid(width, height, color);
 }
 
 export async function makeJpeg(width = 60, height = 90, color: Rgb = { r: 40, g: 40, b: 200 }): Promise<Uint8Array> {
@@ -177,24 +177,4 @@ const zippable = (entries: Record<string, Uint8Array | string>, prefix = ""): Zi
 
 export function makeZip(entries: Record<string, Uint8Array | string>): Uint8Array {
   return zipSync(zippable(entries));
-}
-
-// ---- FB2 ----------------------------------------------------------------------
-
-export function makeFb2(opts: { titleInfo: string; publishInfo?: string; coverPng?: Uint8Array }): string {
-  const cover = opts.coverPng
-    ? `<binary id="cover.png" content-type="image/png">${Buffer.from(opts.coverPng).toString("base64")}</binary>`
-    : "";
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
-  <description>
-    <title-info>
-      ${opts.titleInfo}
-      ${opts.coverPng ? '<coverpage><image l:href="#cover.png"/></coverpage>' : ""}
-    </title-info>
-    ${opts.publishInfo ? `<publish-info>${opts.publishInfo}</publish-info>` : ""}
-  </description>
-  <body><section><p>Text</p></section></body>
-  ${cover}
-</FictionBook>`;
 }

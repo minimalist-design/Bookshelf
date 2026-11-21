@@ -1,17 +1,14 @@
-export const FORMATS = ["epub", "pdf", "cbz", "cbr", "djvu", "fb2"] as const;
+export const FORMATS = ["epub", "pdf", "cbz", "cbr", "djvu"] as const;
 export type BookFormat = (typeof FORMATS)[number];
 
-/** Recognized extensions (lowercase, longest first so `.fb2.zip` wins over `.zip`). */
+/** Recognized extensions (lowercase). */
 const EXTENSIONS: readonly [string, BookFormat][] = [
-  [".fb2.zip", "fb2"],
   [".epub", "epub"],
   [".pdf", "pdf"],
   [".cbz", "cbz"],
   [".cbr", "cbr"],
   [".djvu", "djvu"],
   [".djv", "djvu"],
-  [".fb2", "fb2"],
-  [".fbz", "fb2"],
 ];
 
 export interface DetectedFormat {

@@ -23,10 +23,6 @@ export function bookIds(db: Database): number[] {
   return (db.query("SELECT book_id FROM review_queue").all() as { book_id: number }[]).map((r) => r.book_id);
 }
 
-export function count(db: Database): number {
-  return (db.query("SELECT count(*) AS n FROM review_queue").get() as { n: number }).n;
-}
-
 /** Store (or replace) a book's candidates. */
 export function put(db: Database, bookId: number, candidates: readonly MetadataCandidate[]): void {
   db.query(

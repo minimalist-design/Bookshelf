@@ -2,7 +2,7 @@ import { posix } from "node:path";
 import type { RawMetadata } from "../metadata/types.ts";
 import { normalizeDoi } from "../naming/doi.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
-import { cover, mimeFromName } from "./images.ts";
+import { cover } from "./images.ts";
 import { htmlToText, normalizeDate } from "./text.ts";
 import { arr, attr, parseXml, textOf } from "./xml.ts";
 import { findEntry, openZip, readEntry, readEntryText } from "./zip.ts";
@@ -34,7 +34,7 @@ export async function extractEpub(path: string): Promise<RawMetadata> {
     ...(coverImage && {
       loadCover: async () => {
         const entry = findEntry(zip, coverImage.path);
-        return entry ? cover(await readEntry(zip, entry, 32 * 1024 * 1024), coverImage.mime) : null;
+        return entry ? cover(await readEntry(zip, entry, 32 * 1024 * 1024)) : null;
       },
     }),
   };
@@ -125,7 +125,7 @@ function opfSeries(
 }
 
 /** Cover: EPUB3 cover-image property, EPUB2 <meta name="cover">, or an image item named like a cover. */
-function opfCover(pkg: any, opfPath: string): { path: string; mime: string } | null {
+function opfCover(pkg: any, opfPath: string): { path: string } | null {
   const items = arr(pkg.manifest?.item);
   const isImage = (it: unknown) => (attr(it, "media-type") ?? "").startsWith("image/");
   const coverId = opfLookups(pkg.metadata ?? {}).named("cover");
@@ -137,7 +137,7 @@ function opfCover(pkg: any, opfPath: string): { path: string; mime: string } | n
   if (!href) return null;
   const opfDir = posix.dirname(opfPath);
   const path = posix.normalize(posix.join(opfDir === "." ? "" : opfDir, safeDecode(href.split("#")[0]!)));
-  return { path, mime: attr(coverItem, "media-type") ?? mimeFromName(path) };
+  return { path };
 }
 
 function safeDecode(s: string): string {

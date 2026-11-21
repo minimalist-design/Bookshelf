@@ -1,9 +1,5 @@
-/** The pure rules behind the stateful parts (HTTP pacing, the library watcher, lookups, imports). */
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { openDatabase } from "../src/server/db/index.ts";
+/** The pure rules behind the stateful parts (HTTP pacing, library scans, lookups, imports). */
+import { describe, expect, test } from "bun:test";
 import type { IndexedFile } from "../src/server/library/libraryIndex.ts";
 import { isUnchanged, scanOrder, shouldEmitStatus } from "../src/server/library/library.ts";
 import { isPreferredFormat } from "../src/server/library/linker.ts";
@@ -12,7 +8,6 @@ import { coverUrls } from "../src/server/services/isbndbCovers.ts";
 import { importResult, placedStatus, targetDir } from "../src/server/services/importService.ts";
 import { parseRange } from "../src/server/api/files.ts";
 import { namesChange } from "../src/server/services/books.ts";
-import { missingBooks } from "../src/server/services/maintenance.ts";
 import { classifyEntry } from "../src/server/services/shelves.ts";
 import type { BookRecord } from "../src/server/db/repo/books.ts";
 import { buildPatch, coverOptions, fillRequest, lookupIds, worksToExpand } from "../src/server/services/lookup/lookup.ts";
@@ -20,7 +15,6 @@ import { etaSeconds } from "../src/server/services/lookup/worker.ts";
 import {
   cooldownMs,
   createHttpClient,
-  isFresh,
   paceInterval,
   queuePosition,
   quotaBlockedUntil,
@@ -74,33 +68,13 @@ describe("HTTP pacing and quotas", () => {
     expect(readRateHeaders(new Headers({ "retry-after": "3" }), 0)).toEqual({ advertisedMs: null, daily: null, rateResetAt: null, retryAfterMs: 3000 });
   });
 
-  test("cache freshness: 404s expire sooner", () => {
-    const ttl = { okTtlMs: 1000, notFoundTtlMs: 100 };
-    const at = new Date(0).toISOString();
-    expect(isFresh(200, at, 1000, ttl)).toBe(true);
-    expect(isFresh(200, at, 1001, ttl)).toBe(false);
-    expect(isFresh(404, at, 101, ttl)).toBe(false);
-  });
-
-  describe("cache with a fake clock", () => {
-    let dir = "";
-    afterEach(() => rmSync(dir, { recursive: true, force: true }));
-
-    test("entries are dated and expire by the client's own clock", async () => {
-      dir = mkdtempSync(join(tmpdir(), "bookshelf-httpcache-"));
-      const db = openDatabase(join(dir, "db.sqlite"));
-      let t = Date.UTC(2020, 0, 1); // far from the real time
-      let calls = 0;
-      const fetchImpl = (async () => (calls++, new Response('{"n":1}'))) as unknown as typeof fetch;
-      const http = createHttpClient(db, () => null, { fetchImpl, now: () => t, sleep: async () => {}, okTtlMs: 1000 });
-      await http.getJson("https://example.org/a");
-      expect(http.isCached("https://example.org/a")).toBe(true);
-      t += 1001;
-      expect(http.isCached("https://example.org/a")).toBe(false);
-      await http.getJson("https://example.org/a");
-      expect(calls).toBe(2);
-      db.close();
-    });
+  test("nothing is cached: every GET asks the service", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => (calls++, new Response('{"n":1}'))) as unknown as typeof fetch;
+    const http = createHttpClient(null, () => null, { fetchImpl, sleep: async () => {} });
+    expect(await http.getJson("https://example.org/a")).toEqual({ n: 1 });
+    expect(await http.getJson("https://example.org/a")).toEqual({ n: 1 });
+    expect(calls).toBe(2);
   });
 });
 
@@ -257,12 +231,5 @@ describe("service rules", () => {
     expect(namesChange(m, { ...m, publisher: "Chilton" })).toBe(false);
     expect(namesChange(m, { ...m, authors: ["Frank Herbert", "Brian Herbert"] })).toBe(true);
     expect(namesChange(m, { ...m, isbn13: "9780441172719" })).toBe(true);
-  });
-
-  test("books without files: formats as stored, sorted by title (numbers in order)", () => {
-    const b = (id: number, title: string) => ({ id, title, authors: [], isbn13: null, doi: null, confirmedSource: null, hasCover: false, updatedAt: "" }) as unknown as BookRecord;
-    const list = missingBooks([b(1, "Vol 10"), b(2, "vol 9"), b(3, "Alpha")], new Map([[1, ["epub", "pdf"] as const]]));
-    expect(list.map((x) => x.title)).toEqual(["Alpha", "vol 9", "Vol 10"]);
-    expect(list.find((x) => x.id === 1)!.formats).toEqual(["epub", "pdf"]);
   });
 });

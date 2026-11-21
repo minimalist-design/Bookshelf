@@ -24,8 +24,8 @@ export function inodeKey(ino: number, size: number, mtimeMs: number): string {
 }
 
 /**
- * The live view of which book files exist. Built from disk and kept in sync by the
- * watcher; this — never the database — decides what the library contains.
+ * Which book files exist. Built from disk by full scans and kept up to date by the app's own
+ * file operations; this — never the database — decides what the library contains.
  *
  * It is mutable on purpose (a library can hold many thousands of files, changed one at a time);
  * every change happens under the linker's lock, so there is a single writer.

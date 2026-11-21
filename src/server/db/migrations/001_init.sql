@@ -84,14 +84,7 @@ CREATE TABLE file_hash_cache (
   hash     TEXT NOT NULL
 );
 
-CREATE TABLE http_cache (
-  url        TEXT PRIMARY KEY,
-  status     INTEGER NOT NULL,
-  body       TEXT NOT NULL,
-  fetched_at TEXT NOT NULL
-);
-
--- Requests sent to metadata services (not cache hits), for the usage summary; pruned after a day.
+-- Requests sent to metadata services, for the usage summary; pruned after a day.
 CREATE TABLE http_calls (
   host TEXT NOT NULL,
   at   INTEGER NOT NULL,           -- epoch ms
@@ -121,19 +114,9 @@ CREATE TABLE lookup_jobs (
 CREATE INDEX lookup_jobs_state ON lookup_jobs (state, id);
 CREATE INDEX lookup_jobs_run ON lookup_jobs (run);
 
--- Spelling variants merged into one name. New imports and lookups get `canonical` for any name
--- whose folded form (case, accents, spacing removed) is `variant`.
-CREATE TABLE aliases (
-  field     TEXT NOT NULL,   -- 'authors' | 'tags' | 'series' | 'publishers'
-  variant   TEXT NOT NULL,   -- folded form of the variant
-  name      TEXT NOT NULL,   -- the variant as it was written, for display
-  canonical TEXT NOT NULL,
-  PRIMARY KEY (field, variant)
-);
-
 -- Every book record received from ISBNdb, kept for good: a local copy of what the daily quota paid for,
 -- whether or not the book is in the library (search results that were the wrong book included).
--- Lookups read it before asking ISBNdb. Unlike http_cache, nothing expires or clears it.
+-- Lookups read it before asking ISBNdb. Nothing expires or clears it.
 -- Cover images are downloaded into <data dir>/isbndb-covers (placeholders too).
 CREATE TABLE isbndb_records (
   isbn13      TEXT PRIMARY KEY,

@@ -138,7 +138,7 @@ export async function remove(deps: Deps, name: string): Promise<ShelfDeleteResul
       if (indexed) {
         library.index.set({ ...indexed, relPath: target, filename: target, shelf: null, size: st.size, mtimeMs: Math.trunc(st.mtimeMs), ino: st.ino });
       }
-      // Not yet indexed (e.g. still being copied): the watcher picks it up at its new place.
+      // Not yet indexed (added since the last scan): the next scan picks it up at its new place.
       hashCacheRepo.rename(db, fromAbs, join(root, target));
       moved.push({ from: rel, to: target, bookId: indexed?.bookId ?? null });
     }

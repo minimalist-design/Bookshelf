@@ -146,7 +146,7 @@ function fakeClock() {
 }
 
 describe("HTTP client", () => {
-  test("caches 200/404 in SQLite, waits out a short Retry-After, paces requests per host", async () => {
+  test("asks the service every time (nothing is cached), waits out a short Retry-After, paces requests per host", async () => {
     let n = 0;
     const fetchImpl = (async (input: string | URL | Request) => {
       n++;
@@ -159,10 +159,10 @@ describe("HTTP client", () => {
       const http = createHttpClient(app.db, () => null, { fetchImpl, ...clock, minIntervalMs: 500 });
       expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 });
       expect(clock.waits).toContain(2000);
-      expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 2 }); // cached
+      expect(await http.getJson("https://x.test/busy")).toEqual({ ok: 3 }); // asked again
       expect(await http.getJson("https://x.test/missing")).toBeNull();
       expect(await http.getJson("https://x.test/missing")).toBeNull();
-      expect(n).toBe(3);
+      expect(n).toBe(5);
       expect(clock.waits).toContain(500);
     } finally {
       await app.library.close();
@@ -231,7 +231,7 @@ describe("HTTP client", () => {
     expect(await paceOf("me@example.org", "api.crossref.org")).toBe(2200); // header: 1 per 2 s (+10 %)
   });
 
-  test("usage counts requests sent (not cache hits) per service, in the session and the last hour", async () => {
+  test("usage counts requests sent per service, in the session and the last hour", async () => {
     let n = 0;
     const fetchImpl = (async (input: string | URL | Request) =>
       String(input).includes("busy") && ++n === 1 ? new Response("", { status: 429, headers: { "retry-after": "600" } }) : Response.json({})) as typeof fetch;
@@ -242,12 +242,12 @@ describe("HTTP client", () => {
       const http = createHttpClient(app.db, () => email, { fetchImpl, ...clock, maxWaitMs: 0 });
       const start = clock.now();
       await http.getJson("https://openlibrary.org/a.json");
-      await http.getJson("https://openlibrary.org/a.json"); // cached: not a call
+      await http.getJson("https://openlibrary.org/a.json"); // asked again: a second call
       await http.getJson("https://api.crossref.org/busy").catch(() => null); // a 429 is still a call
       const byHost = () => Object.fromEntries(http.usage(start).services.map((s) => [s.host, s]));
 
       let u = byHost();
-      expect(u["openlibrary.org"]).toMatchObject({ name: "Open Library", calls: 1, lastHour: 1, perSecond: 1, hourLimit: 3600, coolingDownUntil: null });
+      expect(u["openlibrary.org"]).toMatchObject({ name: "Open Library", calls: 2, lastHour: 2, perSecond: 1, hourLimit: 3600, coolingDownUntil: null });
       expect(u["api.crossref.org"]).toMatchObject({ calls: 1, lastHour: 1 });
       expect(u["api.crossref.org"]!.coolingDownUntil).not.toBeNull();
       expect(u["doi.org"]).toMatchObject({ calls: 0, perSecond: null, hourLimit: null });
@@ -255,7 +255,7 @@ describe("HTTP client", () => {
       email = "me@example.org";
       clock.advance(2 * 60 * 60 * 1000);
       u = byHost();
-      expect(u["openlibrary.org"]).toMatchObject({ calls: 1, lastHour: 0, perSecond: 3, hourLimit: 10_800 });
+      expect(u["openlibrary.org"]).toMatchObject({ calls: 2, lastHour: 0, perSecond: 3, hourLimit: 10_800 });
       expect(http.usage(clock.now()).services.every((s) => s.calls === 0)).toBe(true);
       expect(http.usage(start).identified).toBe(true);
     } finally {
@@ -297,9 +297,9 @@ describe("lookup service", () => {
   const idOf = (rel: string) => app.library.index.get(rel)!.bookId;
 
   test("ISBN lookup → diff → apply selected fields + cover → confirmed, renamed if needed", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const id = idOf("S/Frank Herbert - Dune [9780441172719].epub");
 
     const r = await lookups.find(app, id);
     expect(r.errors).toEqual([]);
@@ -320,9 +320,9 @@ describe("lookup service", () => {
   });
 
   test("books without identifiers are searched in both sources; typed ISBN/DOI is exact", async () => {
-    put("S/Dune -- Frank Herbert.epub");
+    put("S/Frank Herbert - Dune.epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert.epub");
+    const id = idOf("S/Frank Herbert - Dune.epub");
     const r = await lookups.find(app, id);
     expect(r.candidates.every((c) => c.match === "search")).toBe(true);
     expect(new Set(r.candidates.map((c) => c.source))).toEqual(new Set(["openlibrary", "doi"]));
@@ -334,9 +334,9 @@ describe("lookup service", () => {
   });
 
   test("applying never clears fields, rejects foreign cover hosts, and renames on title change", async () => {
-    put("S/Some Paper -- Someone -- doi 10.48550_arXiv.1706.03762.pdf");
+    put("S/Someone - Some Paper [10.48550_arXiv.1706.03762].pdf");
     await app.library.open(root);
-    const id = idOf("S/Some Paper -- Someone -- doi 10.48550_arXiv.1706.03762.pdf");
+    const id = idOf("S/Someone - Some Paper [10.48550_arXiv.1706.03762].pdf");
     const c = (await lookups.find(app, id)).candidates[0]!;
     expect(c.match).toBe("doi");
 
@@ -350,9 +350,9 @@ describe("lookup service", () => {
   });
 
   test("hand edits to the current values are applied with the candidate's fields, which win where both are given", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const id = idOf("S/Frank Herbert - Dune [9780441172719].epub");
     await books.update(app, id, { tags: ["scifi"], notes: "Signed copy" });
     const found = await lookups.find(app, id);
     expect(found.notes).toBe("Signed copy"); // local only: shown for editing, never compared
@@ -372,9 +372,9 @@ describe("lookup service", () => {
   });
 
   test("cover picker: own edition, then every edition of the same work (book's language first), then other works", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const id = idOf("S/Frank Herbert - Dune [9780441172719].epub");
     await books.update(app, id, { language: "en" });
 
     const r = await lookups.findCovers(app, id);
@@ -416,11 +416,11 @@ describe("lookup service", () => {
   });
 
   test("bulk lookup fills the review queue; accept-fills only applies identifier matches", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    put("S/Mystery -- Nobody.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
+    put("S/Nobody - Mystery.epub");
     await app.library.open(root);
-    const dune = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    const mystery = idOf("S/Mystery -- Nobody.epub");
+    const dune = idOf("S/Frank Herbert - Dune [9780441172719].epub");
+    const mystery = idOf("S/Nobody - Mystery.epub");
     const events: string[] = [];
     app.events.subscribe((e) => e.type === "lookup.status" && events.push(JSON.stringify(e.status)));
 
@@ -449,11 +449,11 @@ describe("lookup service", () => {
   });
 
   test("a new run counts only its own books, while earlier jobs stay readable", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    put("S/Mystery -- Nobody.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
+    put("S/Nobody - Mystery.epub");
     await app.library.open(root);
-    const dune = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    const mystery = idOf("S/Mystery -- Nobody.epub");
+    const dune = idOf("S/Frank Herbert - Dune [9780441172719].epub");
+    const mystery = idOf("S/Nobody - Mystery.epub");
     app.lookup.enqueue([dune]);
     await app.lookup.idle();
     app.lookup.stop(); // hold the next run so its queue can be inspected
@@ -470,13 +470,12 @@ describe("lookup service", () => {
 
   test("network failures are reported, not thrown; bulk counts them", async () => {
     const failing = createApp(loadConfig({ data_dir: join(tmp, "data2") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: (async () => { throw new Error("ENETUNREACH"); }) as unknown as typeof fetch, sleep: noSleep, retries: 1 },
     });
     try {
-      put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+      put("S/Frank Herbert - Dune [9780441172719].epub");
       await failing.library.open(root);
-      const id = failing.library.index.get("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!.bookId;
+      const id = failing.library.index.get("S/Frank Herbert - Dune [9780441172719].epub")!.bookId;
       const r = await lookups.find(failing, id);
       expect(r.candidates).toEqual([]);
       expect(r.errors.join(" ")).toContain("ENETUNREACH");
@@ -493,9 +492,9 @@ describe("lookup service", () => {
   });
 
   test("HTTP endpoints", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const id = idOf("S/Frank Herbert - Dune [9780441172719].epub");
     const server = Bun.serve({ port: 0, routes: apiRoutes(app) });
     try {
       const lookup = await fetch(`${server.url}api/lookup/${id}`);
@@ -536,13 +535,12 @@ describe("lookup service", () => {
         ++hits === 1 ? new Response("", { status: 429, headers: { "retry-after": "1" } }) : Response.json(JSON.parse(fixture("ol-books-data-9780441172719.json"))),
     });
     const limited = createApp(loadConfig({ data_dir: join(tmp, "data3") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: net.fetchImpl, sleep: noSleep, maxWaitMs: 0 },
     });
     try {
-      put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+      put("S/Frank Herbert - Dune [9780441172719].epub");
       await limited.library.open(root);
-      const id = limited.library.index.get("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!.bookId;
+      const id = limited.library.index.get("S/Frank Herbert - Dune [9780441172719].epub")!.bookId;
       const seen: { pausedBy: string | null; pausedUntil: string | null }[] = [];
       limited.events.subscribe((e) => e.type === "lookup.status" && seen.push(e.status));
       limited.lookup.enqueue([id]);
@@ -559,14 +557,13 @@ describe("lookup service", () => {
   test("cancel drops the waiting books, even during a pause", async () => {
     const net = await fakeNetwork({ "openlibrary\\.org/": () => new Response("", { status: 429, headers: { "retry-after": "3600" } }) });
     const limited = createApp(loadConfig({ data_dir: join(tmp, "data4") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: net.fetchImpl, sleep: noSleep, maxWaitMs: 0 },
     });
     try {
-      put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-      put("S/Mystery -- Nobody.epub");
+      put("S/Frank Herbert - Dune [9780441172719].epub");
+      put("S/Nobody - Mystery.epub");
       await limited.library.open(root);
-      const ids = ["S/Dune -- Frank Herbert -- isbn13 9780441172719.epub", "S/Mystery -- Nobody.epub"].map((r) => limited.library.index.get(r)!.bookId);
+      const ids = ["S/Frank Herbert - Dune [9780441172719].epub", "S/Nobody - Mystery.epub"].map((r) => limited.library.index.get(r)!.bookId);
       limited.lookup.enqueue(ids);
       while (!limited.lookup.status().pausedUntil) await Bun.sleep(5);
       expect(limited.lookup.status()).toMatchObject({ running: true, pending: 2, done: 0 });
@@ -581,9 +578,9 @@ describe("lookup service", () => {
   });
 
   test("the queue is kept in the database and resumes after a restart", async () => {
-    put("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    put("S/Frank Herbert - Dune [9780441172719].epub");
     await app.library.open(root);
-    const id = idOf("S/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const id = idOf("S/Frank Herbert - Dune [9780441172719].epub");
     app.lookup.stop(); // as at shutdown: nothing is looked up, the job stays queued
     app.lookup.enqueue([id]);
     expect(app.lookup.status()).toMatchObject({ running: true, pending: 1 });
@@ -592,7 +589,6 @@ describe("lookup service", () => {
 
     const net = await fakeNetwork();
     app = createApp(loadConfig({ data_dir: join(tmp, "data") }), {
-      library: { debounceMs: 30, stableMs: 80, graceMs: 300 },
       http: { fetchImpl: net.fetchImpl, sleep: noSleep },
     });
     expect(app.lookup.status()).toMatchObject({ running: true, pending: 1 });

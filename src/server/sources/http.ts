@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Database } from "bun:sqlite";
 import type { MetadataUsageDto } from "../../shared/types.ts";
-import * as httpCache from "../db/repo/httpCache.ts";
 import * as httpCalls from "../db/repo/httpCalls.ts";
 
 export interface HttpResponse {
@@ -30,8 +29,6 @@ export interface HostLimit {
  * - Crossref: searches 1 req/s public, 3 req/s polite (mailto); single DOIs 5 / 10 req/s.
  *   Crossref also advertises its current limit in X-Rate-Limit-* headers, which tighten the pace.
  * - doi.org content negotiation: no published limit; 1 req/s.
- * - Wikidata: the API has no fixed limit for serial reads; the query service allows 60 s of query
- *   time per minute. Author lookups are rare and one at a time; 2 req/s and 1 req/s.
  * `perSecond` is the published limit shown in the usage summary (for Crossref, the stricter search one).
  */
 export const HOST_LIMITS: Readonly<Record<string, HostLimit>> = {
@@ -39,8 +36,6 @@ export const HOST_LIMITS: Readonly<Record<string, HostLimit>> = {
   "covers.openlibrary.org": { name: "Open Library covers", intervalMs: 1000, perSecond: null },
   "api.crossref.org": { name: "Crossref", intervalMs: 1100, identifiedIntervalMs: 500, perSecond: 1, identifiedPerSecond: 3 },
   "doi.org": { name: "doi.org", intervalMs: 1000, perSecond: null },
-  "www.wikidata.org": { name: "Wikidata", intervalMs: 500, perSecond: null },
-  "query.wikidata.org": { name: "Wikidata Query Service", intervalMs: 1000, perSecond: null },
 };
 
 /** ISBNdb's API host (Basic plan); its limits come from the config file, so it isn't in HOST_LIMITS. */
@@ -74,9 +69,6 @@ export interface HttpClientOptions {
   minIntervalMs?: number;
   hostLimits?: Record<string, HostLimit>;
   timeoutMs?: number;
-  /** Cache lifetime for successful responses and for 404s. */
-  okTtlMs?: number;
-  notFoundTtlMs?: number;
   retries?: number;
   /** Longest a request waits for a host's rate-limit cooldown before failing with RateLimitedError. */
   maxWaitMs?: number;
@@ -241,11 +233,6 @@ export function readRateHeaders(headers: Headers, now: number): RateHeaders {
   };
 }
 
-/** Whether a cached answer is still good: successful ones live longer than 404s. */
-export function isFresh(status: number, fetchedAt: string, now: number, ttl: { okTtlMs: number; notFoundTtlMs: number }): boolean {
-  return now - Date.parse(fetchedAt) <= (status === 200 ? ttl.okTtlMs : ttl.notFoundTtlMs);
-}
-
 export interface UsageInput {
   readonly now: number;
   readonly identified: boolean;
@@ -330,8 +317,8 @@ function memoryCallLog(): CallLog {
 /**
  * Polite HTTP client for metadata services: identifies itself, keeps each host under its
  * published rate limit (one request at a time, starts spaced out), stops sending to a host
- * that answers 429 until its cooldown is over, retries 5xx with backoff and caches successful
- * and 404 responses in SQLite. Interactive requests go ahead of background (bulk) ones.
+ * that answers 429 until its cooldown is over and retries 5xx with backoff. Nothing is cached: every call asks
+ * the service. Interactive requests go ahead of background (bulk) ones.
  */
 export interface HttpClient {
   userAgent(): string;
@@ -341,20 +328,14 @@ export interface HttpClient {
   background<T>(fn: () => Promise<T>): Promise<T>;
   /** Hosts currently cooling down after a 429, with the time they accept requests again. */
   cooldowns(): { host: string; until: number }[];
-  /** GET returning text (JSON callers parse). Cached responses are returned without a request. */
+  /** GET returning text (JSON callers parse). */
   get(url: string, accept?: string, opts?: RequestOptions): Promise<HttpResponse>;
   getJson<T>(url: string, accept?: string, opts?: RequestOptions): Promise<T | null>;
-  /** POST of a JSON body, returning text; never cached (callers can `prime` the cache with what they learn). */
+  /** POST of a JSON body, returning text. */
   post(url: string, payload: unknown, opts?: RequestOptions): Promise<HttpResponse>;
-  /** GET that always asks the service (account and quota details); not cached. */
-  getFresh(url: string, opts?: RequestOptions): Promise<HttpResponse>;
-  /** Whether a GET of `url` would be answered from the cache. */
-  isCached(url: string, accept?: string): boolean;
-  /** Store a response for a GET of `url` learned another way (e.g. from a bulk call). */
-  prime(url: string, res: HttpResponse, accept?: string): void;
   /** Calls left today under `host`'s daily quota (the lower of our count and the service's own report); null when it has none. */
   quotaLeft(host: string): number | null;
-  /** Binary GET (covers); not cached. Returns null for 404. */
+  /** Binary GET (covers). Returns null for 404. */
   getBytes(url: string, maxBytes?: number): Promise<Uint8Array | null>;
   /**
    * Requests sent per service since `since` and in the last hour, with each service's published
@@ -365,13 +346,11 @@ export interface HttpClient {
   spentToday(host: string): number;
 }
 
-/** `db` null: nothing is cached and calls are counted in memory (tests). */
+/** `db` null: calls are counted in memory (tests). */
 export function createHttpClient(db: Database | null, contactEmail: () => string | null, options: HttpClientOptions = {}): HttpClient {
   const opts = {
     minIntervalMs: options.minIntervalMs ?? 1000,
     timeoutMs: options.timeoutMs ?? 20_000,
-    okTtlMs: options.okTtlMs ?? 7 * DAY,
-    notFoundTtlMs: options.notFoundTtlMs ?? DAY,
     retries: options.retries ?? 3,
     maxWaitMs: options.maxWaitMs ?? 10_000,
   };
@@ -532,24 +511,9 @@ export function createHttpClient(db: Database | null, contactEmail: () => string
     throw new HttpError(`Could not reach ${host}: ${lastError instanceof Error ? lastError.message : String(lastError)}`, null);
   };
 
-  const readCache = (key: string): HttpResponse | null => {
-    const row = db ? httpCache.get(db, key) : null;
-    return row && isFresh(row.status, row.fetchedAt, now(), opts) ? { status: row.status, body: row.body } : null;
-  };
-
-  const writeCache = (key: string, res: HttpResponse) => {
-    if (db) httpCache.put(db, key, { ...res, fetchedAt: new Date(now()).toISOString() });
-  };
-
   const get = async (url: string, accept = "application/json", ropts: RequestOptions = {}): Promise<HttpResponse> => {
-    const key = `${accept} ${url}`;
-    const cached = readCache(key);
-    if (cached) return cached;
     const res = await request(url, accept, ropts);
-    const cacheable = res.status === 200 || res.status === 404;
-    const out = { status: res.status, body: cacheable ? await res.text() : "" };
-    if (cacheable) writeCache(key, out);
-    return out;
+    return { status: res.status, body: await res.text() };
   };
 
   return {
@@ -574,12 +538,6 @@ export function createHttpClient(db: Database | null, contactEmail: () => string
       const res = await request(url, "application/json", ropts, JSON.stringify(payload));
       return { status: res.status, body: await res.text() };
     },
-    async getFresh(url, ropts = {}) {
-      const res = await request(url, "application/json", ropts);
-      return { status: res.status, body: await res.text() };
-    },
-    isCached: (url, accept = "application/json") => readCache(`${accept} ${url}`) !== null,
-    prime: (url, res, accept = "application/json") => writeCache(`${accept} ${url}`, res),
     quotaLeft: (host) => quotaRemaining(hostLimits[host]?.dailyLimit, spentToday(host), reportedDaily(host)),
     async getBytes(url, maxBytes = 20 * 1024 * 1024) {
       const res = await request(url, "image/*", { cost: 0 });

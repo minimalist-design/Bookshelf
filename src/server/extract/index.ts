@@ -4,7 +4,6 @@ import type { BookFormat } from "../naming/formats.ts";
 import { extractCbr, extractCbz } from "./comic.ts";
 import { extractDjvu } from "./djvu.ts";
 import { extractEpub } from "./epub.ts";
-import { extractFb2 } from "./fb2.ts";
 import { extractPdf } from "./pdf.ts";
 
 export type Extractor = (absPath: string, format: BookFormat) => Promise<RawMetadata>;
@@ -22,7 +21,6 @@ export function createExtractor(tools: ExternalTools): Extractor {
     cbz: extractCbz,
     cbr: (p) => extractCbr(p, tools),
     djvu: (p) => extractDjvu(p, tools),
-    fb2: extractFb2,
   };
   return async (absPath, format) => {
     let timer: ReturnType<typeof setTimeout> | undefined;

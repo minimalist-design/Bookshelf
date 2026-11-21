@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createApp, type AppContext } from "../src/server/app.ts";
 import { loadConfig } from "../src/server/config.ts";
 import type { IndexedFile } from "../src/server/library/libraryIndex.ts";
 import { listLibrary, listShelves, shelvesFrom } from "../src/server/library/queries.ts";
-import { closeTestApp, FAST_LIBRARY, makeEpub, makePdf, makePng, scratchDir, xmpPacket } from "./fixtures.ts";
+import { closeTestApp, makeEpub, makePdf, makePng, scratchDir, xmpPacket } from "./fixtures.ts";
 import * as bookRepo from "../src/server/db/repo/books.ts";
 import * as coverStore from "../src/server/covers/store.ts";
-
 
 let tmp: string;
 let root: string;
@@ -16,7 +15,7 @@ let dataDir: string;
 const apps: AppContext[] = [];
 
 function newApp(): AppContext {
-  const app = createApp(loadConfig({ data_dir: dataDir }), { library: { ...FAST_LIBRARY, pollIntervalMs: 60_000 } });
+  const app = createApp(loadConfig({ data_dir: dataDir }));
   apps.push(app);
   return app;
 }
@@ -26,14 +25,6 @@ function put(rel: string, content: string | Uint8Array = rel): string {
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   return abs;
-}
-
-async function waitFor(cond: () => boolean, timeoutMs = 4000): Promise<void> {
-  const start = Date.now();
-  while (!cond()) {
-    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
-    await Bun.sleep(20);
-  }
 }
 
 const list = (app: AppContext, query = {}) => listLibrary(app.library.index, app.db, query);
@@ -52,11 +43,11 @@ afterEach(async () => {
 
 describe("full scan", () => {
   test("indexes shelves, unshelved and nested files; ignores hidden/partial/unsupported", async () => {
-    put("Loose Book -- Jane Doe.epub");
-    put("Fiction/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
-    put("Fiction/Deep/Nested/Emma -- Jane Austen.pdf");
+    put("Jane Doe - Loose Book.epub");
+    put("Fiction/Frank Herbert - Dune [9780441172719].epub");
+    put("Fiction/Deep/Nested/Jane Austen - Emma.pdf");
     put("Science/Brian Greene - The Elegant Universe [9780393338102].pdf");
-    put("Science/.hidden/Secret -- X.epub");
+    put("Science/.hidden/X - Secret.epub");
     put(".bookshelf-incoming/tmp.epub");
     put("Science/partial.epub.part");
     put("Science/notes.txt");
@@ -83,10 +74,22 @@ describe("full scan", () => {
     ]);
   });
 
+  test("a filename not in Bookshelf's style is the title, with nothing guessed from it", async () => {
+    put("A/Dune -- Frank Herbert -- isbn13 9780441172719.epub");
+    const app = newApp();
+    await app.library.open(root);
+    expect(list(app).items[0]).toMatchObject({
+      title: "Dune -- Frank Herbert -- isbn13 9780441172719",
+      authors: [],
+      isbn13: null,
+      metadataSource: "filename",
+    });
+  });
+
   test("sorting and full-text search", async () => {
-    put("A/The Zebra Book -- Zed Adams.epub");
-    put("A/Apples -- Mary Young -- isbn13 9780131103627.epub");
-    put("A/Middle -- Bob Martin.epub");
+    put("A/Zed Adams - The Zebra Book.epub");
+    put("A/Mary Young - Apples [9780131103627].epub");
+    put("A/Bob Martin - Middle.epub");
     const app = newApp();
     await app.library.open(root);
 
@@ -100,9 +103,9 @@ describe("full scan", () => {
   });
 
   test("same identifier: different formats share one book, same format does not", async () => {
-    put("A/Dune -- Frank Herbert -- isbn13 9780441172719.epub", "epub bytes");
-    put("B/Dune -- Frank Herbert -- isbn13 9780441172719.pdf", "pdf bytes");
-    put("C/Dune copy -- Frank Herbert -- isbn13 9780441172719.pdf", "other pdf bytes");
+    put("A/Frank Herbert - Dune [9780441172719].epub", "epub bytes");
+    put("B/Frank Herbert - Dune [9780441172719].pdf", "pdf bytes");
+    put("C/Frank Herbert - Dune copy [9780441172719].pdf", "other pdf bytes");
     const app = newApp();
     await app.library.open(root);
 
@@ -121,15 +124,15 @@ describe("full scan", () => {
   });
 
   test("metadata survives a restart (linked by hash, not path)", async () => {
-    put("A/Dune -- Frank Herbert.epub");
+    put("A/Frank Herbert - Dune.epub");
     let app = newApp();
     await app.library.open(root);
-    const id = bookIdOf(app, "A/Dune -- Frank Herbert.epub")!;
+    const id = bookIdOf(app, "A/Frank Herbert - Dune.epub")!;
     await app.library.close();
 
     // Rename while the server is down: the hash still links it.
     mkdirSync(join(root, "B"));
-    renameSync(join(root, "A/Dune -- Frank Herbert.epub"), join(root, "B/renamed.epub"));
+    renameSync(join(root, "A/Frank Herbert - Dune.epub"), join(root, "B/renamed.epub"));
     app = newApp();
     await app.library.open(root);
     expect(bookIdOf(app, "B/renamed.epub")).toBe(id);
@@ -139,18 +142,18 @@ describe("full scan", () => {
 
 describe("retention on startup", () => {
   test("unconfirmed rows without files are deleted, confirmed rows are kept", async () => {
-    put("A/Keep -- Someone.epub");
-    put("A/Drop -- Someone.epub");
+    put("A/Someone - Keep.epub");
+    put("A/Someone - Drop.epub");
     let app = newApp();
     await app.library.open(root);
-    const keep = bookIdOf(app, "A/Keep -- Someone.epub")!;
-    const drop = bookIdOf(app, "A/Drop -- Someone.epub")!;
+    const keep = bookIdOf(app, "A/Someone - Keep.epub")!;
+    const drop = bookIdOf(app, "A/Someone - Drop.epub")!;
     app.db.query("UPDATE books SET confirmed_source = 'openlibrary' WHERE id = ?").run(keep);
     await app.library.close();
 
-    rmSync(join(root, "A/Keep -- Someone.epub"));
-    rmSync(join(root, "A/Drop -- Someone.epub"));
-    put("A/Other -- Person.epub"); // library is not empty
+    rmSync(join(root, "A/Someone - Keep.epub"));
+    rmSync(join(root, "A/Someone - Drop.epub"));
+    put("A/Person - Other.epub"); // library is not empty
     app = newApp();
     await app.library.open(root);
     expect(bookRepo.exists(app.db, keep)).toBe(true);
@@ -158,16 +161,16 @@ describe("retention on startup", () => {
     expect(list(app).items.map((b) => b.title)).toEqual(["Other"]);
 
     // The kept row reconnects when the file comes back.
-    put("Elsewhere/whatever.epub", "A/Keep -- Someone.epub"); // same bytes as before
+    put("Elsewhere/whatever.epub", "A/Someone - Keep.epub"); // same bytes as before
     await app.library.rescan();
     expect(bookIdOf(app, "Elsewhere/whatever.epub")).toBe(keep);
   });
 
   test("an empty/unmounted library never purges metadata", async () => {
-    put("A/Book -- Someone.epub");
+    put("A/Someone - Book.epub");
     let app = newApp();
     await app.library.open(root);
-    const id = bookIdOf(app, "A/Book -- Someone.epub")!;
+    const id = bookIdOf(app, "A/Someone - Book.epub")!;
     await app.library.close();
 
     rmSync(join(root, "A"), { recursive: true });
@@ -182,10 +185,16 @@ describe("retention on startup", () => {
     await app.library.open(root);
     expect(app.library.status().state).toBe("unavailable");
     expect(bookRepo.exists(app.db, id)).toBe(true);
+
+    // Nothing polls: the library comes back with the next rescan.
+    put("A/Someone - Book.epub");
+    await app.library.rescan();
+    expect(app.library.status().state).toBe("ready");
+    expect(bookIdOf(app, "A/Someone - Book.epub")).toBe(id);
   });
 
-  test("the empty-library warning clears once a book is added", async () => {
-    put("A/Book -- Someone.epub");
+  test("the empty-library warning clears once a rescan finds books", async () => {
+    put("A/Someone - Book.epub");
     let app = newApp();
     await app.library.open(root);
     await app.library.close();
@@ -195,131 +204,138 @@ describe("retention on startup", () => {
     await app.library.open(root);
     expect(app.library.status().message).toMatch(/mounted/);
 
-    put("B/New Book -- Author.epub");
-    await waitFor(() => titles(app).includes("New Book"));
+    put("B/Author - New Book.epub");
+    await app.library.rescan();
+    expect(titles(app)).toContain("New Book");
     expect(app.library.status().message).toBeNull();
   });
 });
 
-describe("watcher", () => {
-  test("new files appear, deleted unconfirmed books disappear with their metadata", async () => {
+describe("rescans", () => {
+  test("changes made outside Bookshelf show up at the next rescan, not before", async () => {
+    put("Shelf/Someone - Staying.epub"); // a scan that finds no files at all keeps everything (unmounted drive)
     const app = newApp();
     await app.library.open(root);
-    put("Shelf/New Book -- Author.epub");
-    await waitFor(() => titles(app).includes("New Book"));
-    const id = bookIdOf(app, "Shelf/New Book -- Author.epub")!;
+    put("Shelf/Author - New Book.epub");
+    await Bun.sleep(100);
+    expect(titles(app)).toEqual(["Staying"]);
+    await app.library.rescan();
+    expect(titles(app)).toEqual(["New Book", "Staying"]);
+    const id = bookIdOf(app, "Shelf/Author - New Book.epub")!;
 
-    rmSync(join(root, "Shelf/New Book -- Author.epub"));
-    await waitFor(() => !app.library.index.hasBook(id));
-    expect(bookRepo.exists(app.db, id)).toBe(true); // grace period
-    await waitFor(() => !bookRepo.exists(app.db, id));
+    rmSync(join(root, "Shelf/Author - New Book.epub"));
+    await app.library.rescan();
+    expect(app.library.index.hasBook(id)).toBe(false);
+    expect(bookRepo.exists(app.db, id)).toBe(false); // unconfirmed: dropped with the file
   });
 
   test("confirmed metadata is kept after an external delete", async () => {
-    put("Shelf/Kept -- Author.epub");
+    put("Shelf/Author - Kept.epub");
     const app = newApp();
     await app.library.open(root);
-    const id = bookIdOf(app, "Shelf/Kept -- Author.epub")!;
+    const id = bookIdOf(app, "Shelf/Author - Kept.epub")!;
     app.db.query("UPDATE books SET confirmed_source = 'manual' WHERE id = ?").run(id);
-    rmSync(join(root, "Shelf/Kept -- Author.epub"));
-    await waitFor(() => !app.library.index.hasBook(id));
-    await Bun.sleep(FAST_LIBRARY.graceMs + 150);
+    rmSync(join(root, "Shelf/Author - Kept.epub"));
+    await app.library.rescan();
+    expect(app.library.index.hasBook(id)).toBe(false);
     expect(bookRepo.exists(app.db, id)).toBe(true);
     expect(titles(app)).toEqual([]);
   });
 
-  test("moving a file between shelves keeps its metadata (no deletion after grace)", async () => {
-    put("A/Moved -- Author.epub");
+  test("moving a file between shelves keeps its metadata", async () => {
+    put("A/Author - Moved.epub");
     const app = newApp();
     await app.library.open(root);
-    const id = bookIdOf(app, "A/Moved -- Author.epub")!;
+    const id = bookIdOf(app, "A/Author - Moved.epub")!;
     mkdirSync(join(root, "B"));
-    renameSync(join(root, "A/Moved -- Author.epub"), join(root, "B/Moved -- Author.epub"));
-    await waitFor(() => bookIdOf(app, "B/Moved -- Author.epub") === id && !app.library.index.get("A/Moved -- Author.epub"));
-    await Bun.sleep(FAST_LIBRARY.graceMs + 150);
+    renameSync(join(root, "A/Author - Moved.epub"), join(root, "B/Author - Moved.epub"));
+    await app.library.rescan();
+    expect(bookIdOf(app, "B/Author - Moved.epub")).toBe(id);
+    expect(app.library.index.get("A/Author - Moved.epub")).toBeUndefined();
     expect(bookRepo.exists(app.db, id)).toBe(true);
     expect(list(app, { shelf: "B" }).items.map((b) => b.id)).toEqual([id]);
   });
 
   test("renaming a shelf directory keeps every book", async () => {
-    put("Old/One -- A.epub");
-    put("Old/Sub/Two -- B.pdf");
+    put("Old/A - One.epub");
+    put("Old/Sub/B - Two.pdf");
     const app = newApp();
     await app.library.open(root);
     const ids = list(app).items.map((b) => b.id).sort();
     renameSync(join(root, "Old"), join(root, "New"));
-    await waitFor(() => list(app, { shelf: "New" }).total === 2 && list(app, { shelf: "Old" }).total === 0);
-    await Bun.sleep(FAST_LIBRARY.graceMs + 150);
+    await app.library.rescan();
+    expect(list(app, { shelf: "New" }).total).toBe(2);
+    expect(list(app, { shelf: "Old" }).total).toBe(0);
     expect(list(app).items.map((b) => b.id).sort()).toEqual(ids);
     expect(ids.every((id) => bookRepo.exists(app.db, id))).toBe(true);
   });
 
-  test("a file still being written is processed once stable", async () => {
-    const app = newApp();
-    await app.library.open(root);
-    const abs = put("Growing -- Author.pdf", "part1");
-    await Bun.sleep(40);
-    appendFileSync(abs, "part2");
-    await waitFor(() => titles(app).includes("Growing"));
-    expect(app.library.index.get("Growing -- Author.pdf")!.size).toBe(10);
-  });
-
   test("content change with the same ISBN stays the same book", async () => {
-    put("A/Dune -- Frank Herbert -- isbn13 9780441172719.epub", "v1");
+    const rel = "A/Frank Herbert - Dune [9780441172719].epub";
+    put(rel, "v1");
     const app = newApp();
     await app.library.open(root);
-    const id = bookIdOf(app, "A/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!;
-    const oldHash = app.library.index.get("A/Dune -- Frank Herbert -- isbn13 9780441172719.epub")!.hash;
-    await Bun.sleep(20);
-    writeFileSync(join(root, "A/Dune -- Frank Herbert -- isbn13 9780441172719.epub"), "v2 with more bytes");
-    await waitFor(() => app.library.index.get("A/Dune -- Frank Herbert -- isbn13 9780441172719.epub")?.hash !== oldHash);
-    expect(bookIdOf(app, "A/Dune -- Frank Herbert -- isbn13 9780441172719.epub")).toBe(id);
-    await Bun.sleep(FAST_LIBRARY.graceMs + 150);
+    const id = bookIdOf(app, rel)!;
+    const oldHash = app.library.index.get(rel)!.hash;
+    writeFileSync(join(root, rel), "v2 with more bytes");
+    await app.library.rescan();
+    expect(app.library.index.get(rel)!.hash).not.toBe(oldHash);
+    expect(bookIdOf(app, rel)).toBe(id);
     expect(bookRepo.exists(app.db, id)).toBe(true);
   });
 });
 
 describe("embedded metadata and covers", () => {
-  async function epub(title: string, author: string, isbn: string) {
+  async function epub(title: string, author: string, isbn: string, coverPng?: Uint8Array) {
     return makeEpub({
       metadataXml: `<dc:title>${title}</dc:title><dc:creator>${author}</dc:creator><dc:identifier>urn:isbn:${isbn}</dc:identifier>
         <dc:subject>Classic</dc:subject>`,
       manifestXml: `<item id="c" href="cover.png" media-type="image/png" properties="cover-image"/>`,
-      files: { "cover.png": await makePng(300, 450) },
+      files: { "cover.png": coverPng ?? (await makePng(300, 450)) },
     });
   }
 
-  test("embedded metadata is used and the cover stored; filename fills gaps", async () => {
-    put("Shelf/download (1).epub", await epub("Embedded Title", "Embedded Author", "9780441172719"));
-    put("Shelf/Paper From Filename -- Some Body.pdf", makePdf({ info: { Title: "untitled", Author: "Administrator" } }));
+  test("embedded metadata is used and the cover stored as it is; filename fills gaps", async () => {
+    const png = await makePng(300, 450);
+    put("Shelf/download (1).epub", await epub("Embedded Title", "Embedded Author", "9780441172719", png));
+    put("Shelf/Some Body - Paper From Filename.pdf", makePdf());
     const app = newApp();
     await app.library.open(root);
 
     const e = list(app, { q: "Embedded" }).items[0]!;
     expect(e).toMatchObject({ title: "Embedded Title", authors: ["Embedded Author"], isbn13: "9780441172719", tags: ["Classic"], metadataSource: "embedded" });
-    await waitFor(() => bookRepo.get(app.db, e.id)!.hasCover);
-    expect(coverStore.exists(app.config.coversDir, e.id)).toBe(true);
-    const thumb = await new Bun.Image(coverStore.path(app.config.coversDir, e.id, "thumb")).metadata();
-    expect([thumb.width, thumb.height, thumb.format]).toEqual([300, 450, "webp"]);
+    expect(bookRepo.get(app.db, e.id)!.hasCover).toBe(true);
+    const cover = coverStore.find(app.config.coversDir, e.id)!;
+    expect(cover.contentType).toBe("image/png");
+    expect(readFileSync(cover.path).equals(png)).toBe(true);
 
     const p = list(app, { q: "Paper" }).items[0]!;
     expect(p).toMatchObject({ title: "Paper From Filename", authors: ["Some Body"], metadataSource: "filename" });
   });
 
+  test("embedded values are taken as they are, even placeholder ones", async () => {
+    put("Shelf/Some Body - Paper From Filename.pdf", makePdf({ info: { Title: "untitled", Author: "Administrator" } }));
+    const app = newApp();
+    await app.library.open(root);
+    expect(list(app).items[0]).toMatchObject({ title: "untitled", authors: ["Administrator"], metadataSource: "embedded" });
+  });
+
   test("a PDF with the same embedded ISBN is attached to the EPUB's book and covers are cleaned up with the row", async () => {
     put("A/x.epub", await epub("Dune", "Frank Herbert", "9780441172719"));
     put("B/y.pdf", makePdf({ info: { Title: "Dune (scan)", Keywords: "ISBN 9780441172719" } }));
+    put("C/Someone - Staying.epub");
     const app = newApp();
     await app.library.open(root);
-    const books = list(app).items;
+    const books = list(app).items.filter((b) => b.title !== "Staying");
     expect(books).toHaveLength(1);
     expect(books[0]!.files.map((f) => f.format).sort()).toEqual(["epub", "pdf"]);
     const id = books[0]!.id;
-    await waitFor(() => coverStore.exists(app.config.coversDir, id));
+    expect(coverStore.exists(app.config.coversDir, id)).toBe(true);
 
     rmSync(join(root, "A/x.epub"));
     rmSync(join(root, "B/y.pdf"));
-    await waitFor(() => !bookRepo.exists(app.db, id));
+    await app.library.rescan();
+    expect(bookRepo.exists(app.db, id)).toBe(false);
     expect(coverStore.exists(app.config.coversDir, id)).toBe(false);
   });
 
@@ -335,14 +351,14 @@ describe("embedded metadata and covers", () => {
     const app = newApp();
     await app.library.open(root);
     const id = list(app).items[0]!.id;
-    await waitFor(() => bookRepo.get(app.db, id)!.hasCover);
-    const pdfCover = Bun.file(coverStore.path(app.config.coversDir, id, "full")).size;
+    expect(bookRepo.get(app.db, id)!.hasCover).toBe(true);
+    expect(coverStore.find(app.config.coversDir, id)!.contentType).toBe("image/jpeg"); // the rendered first page
     expect(bookRepo.get(app.db, id)).toMatchObject({ title: "Dune (scan)", authors: [], pages: 2 });
 
     put("A/book.epub", await epub("Dune", "Frank Herbert", "9780441172719"));
-    await waitFor(() => bookRepo.get(app.db, id)!.title === "Dune");
-    expect(bookRepo.get(app.db, id)).toMatchObject({ authors: ["Frank Herbert"], pages: 2, tags: ["Classic"], metadataSource: "embedded" });
-    await waitFor(() => Bun.file(coverStore.path(app.config.coversDir, id, "full")).size !== pdfCover); // EPUB cover replaced the rendered page
+    await app.library.rescan();
+    expect(bookRepo.get(app.db, id)).toMatchObject({ title: "Dune", authors: ["Frank Herbert"], pages: 2, tags: ["Classic"], metadataSource: "embedded" });
+    expect(coverStore.find(app.config.coversDir, id)!.contentType).toBe("image/png"); // EPUB cover replaced the rendered page
     expect(list(app).items).toHaveLength(1);
   });
 
@@ -353,7 +369,8 @@ describe("embedded metadata and covers", () => {
     const id = list(app).items[0]!.id;
     app.db.query("UPDATE books SET confirmed_source = 'manual' WHERE id = ?").run(id);
     put("A/book.epub", await epub("Dune", "Frank Herbert", "9780441172719"));
-    await waitFor(() => app.library.index.filesOfBook(id).length === 2);
+    await app.library.rescan();
+    expect(app.library.index.filesOfBook(id)).toHaveLength(2);
     expect(bookRepo.get(app.db, id)).toMatchObject({ title: "My Corrected Title", authors: [] });
   });
 });

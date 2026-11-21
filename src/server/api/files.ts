@@ -6,7 +6,6 @@ export const CONTENT_TYPES: Record<BookFormat, string> = {
   cbz: "application/vnd.comicbook+zip",
   cbr: "application/vnd.comicbook-rar",
   djvu: "image/vnd.djvu",
-  fb2: "application/x-fictionbook+xml",
 };
 
 /** RFC 6266 / 5987: ASCII fallback plus the exact UTF-8 name. */

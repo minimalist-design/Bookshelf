@@ -2,9 +2,8 @@ import type { Database } from "bun:sqlite";
 import * as bookRepo from "../db/repo/books.ts";
 import * as hashCacheRepo from "../db/repo/hashCache.ts";
 import type { Extractor } from "../extract/index.ts";
-import { applyRules } from "../metadata/rules.ts";
 import { FORMAT_METADATA_RANK, fillMetadata, mergeMetadata, type MergeResult } from "../extract/merge.ts";
-import { pickMetadata, type BookMetadata, type RawMetadata } from "../metadata/types.ts";
+import { pickMetadata, type RawMetadata } from "../metadata/types.ts";
 import type { BookFormat, DetectedFormat } from "../naming/formats.ts";
 import { parseFilename, type ParsedFilename } from "../naming/parseFilename.ts";
 import { hashFile } from "./hasher.ts";
@@ -49,10 +48,6 @@ export interface LinkerDeps {
    * identifier), with the embedded metadata that was read from it (e.g. to store its cover).
    */
   onLinkedNew?: (bookId: number, info: LinkedNewInfo, embedded: RawMetadata, file: FileToLink) => Promise<void> | void;
-  /** Rewrites names read from files to their remembered main spelling (aliases). */
-  canonicalize?: (m: BookMetadata) => BookMetadata;
-  /** Whether a name is already an author in the library (tells titles from names in filenames). */
-  isKnownAuthor?: (name: string) => boolean;
 }
 
 /**
@@ -65,9 +60,9 @@ export interface LinkerDeps {
 export interface Linker {
   /** Run `fn` while holding the linking lock (all book-identity decisions are serialized). */
   exclusive<T>(fn: () => T | Promise<T>): Promise<T>;
-  /** A filename read with the library's authors as a hint to which part is the author. */
+  /** A filename read in Bookshelf's own style (any other name is just a title). */
   parse(filename: string): ParsedFilename;
-  /** Metadata of a file (embedded, else from its name), reorganized by the metadata rules, with remembered aliases applied. */
+  /** Metadata of a file: embedded, else from its name. */
   merge(embedded: RawMetadata, parsed: ParsedFilename, fileStem: string): MergeResult;
   hashOf(file: FileToLink): Promise<string>;
   link(file: FileToLink): Promise<LinkResult>;
@@ -121,14 +116,8 @@ export function createLinker(deps: LinkerDeps): Linker {
     return run;
   };
 
-  const parse = (filename: string) => parseFilename(filename, { isKnownAuthor: deps.isKnownAuthor });
-
-  const merge = (embedded: RawMetadata, parsed: ParsedFilename, fileStem: string): MergeResult => {
-    const merged = mergeMetadata(embedded, parsed, fileStem, { isKnownAuthor: deps.isKnownAuthor });
-    const ruled = applyRules(merged.metadata);
-    const canonical = deps.canonicalize?.(ruled) ?? ruled;
-    return canonical === merged.metadata ? merged : { ...merged, metadata: canonical };
-  };
+  const parse = parseFilename;
+  const merge = mergeMetadata;
 
   const hashOf = async (file: FileToLink): Promise<string> => {
     if (file.hash) return file.hash;

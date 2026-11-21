@@ -42,7 +42,7 @@ export interface ApiError {
 
 // ---- Library ------------------------------------------------------------------
 
-export type BookFormat = "epub" | "pdf" | "cbz" | "cbr" | "djvu" | "fb2";
+export type BookFormat = "epub" | "pdf" | "cbz" | "cbr" | "djvu";
 export type ConfirmedSource = "isbndb" | "openlibrary" | "doi" | "manual";
 export type MetadataSource = "embedded" | "filename" | "mixed";
 
@@ -136,7 +136,6 @@ export interface LibraryStatus {
   readonly scan: { readonly done: number; readonly total: number } | null;
   readonly fileCount: number;
   readonly bookCount: number;
-  readonly watching: boolean;
   readonly message: string | null;
 }
 
@@ -148,7 +147,7 @@ export type ServerEvent =
 // ---- Import -------------------------------------------------------------------
 
 /** Extensions accepted for upload (lowercase, with leading dot). */
-export const SUPPORTED_EXTENSIONS = [".epub", ".pdf", ".cbz", ".cbr", ".djvu", ".djv", ".fb2", ".fb2.zip", ".fbz"] as const;
+export const SUPPORTED_EXTENSIONS = [".epub", ".pdf", ".cbz", ".cbr", ".djvu", ".djv"] as const;
 
 /**
  * imported: new book · attached: new format of an existing book · reconnected: kept (confirmed)
@@ -408,7 +407,7 @@ export interface LookupJobDto {
   readonly error: string | null;
 }
 
-/** Requests sent to one metadata service (cache hits are not counted). */
+/** Requests sent to one metadata service. */
 export interface MetadataServiceUsage {
   readonly host: string;
   readonly name: string;
@@ -438,21 +437,7 @@ export interface MetadataUsageDto {
   readonly services: readonly MetadataServiceUsage[];
 }
 
-// ---- Maintenance ----------------------------------------------------------------
-
-/** Metadata row whose files are not on disk (kept because it is confirmed, or pending cleanup). */
-export interface MissingBookDto {
-  readonly id: number;
-  readonly title: string;
-  readonly authors: readonly string[];
-  readonly isbn13: string | null;
-  readonly doi: string | null;
-  readonly confirmedSource: ConfirmedSource | null;
-  readonly hasCover: boolean;
-  /** Formats of the file versions known by content hash. */
-  readonly formats: readonly BookFormat[];
-  readonly updatedAt: string;
-}
+// ---- Reference data ----------------------------------------------------------------
 
 /** An imported reference file (`/api/reference`). */
 export interface ReferenceSourceDto {
@@ -469,146 +454,4 @@ export interface ReferenceSourceDto {
   readonly license: string | null;
   readonly counts: { readonly authors: number; readonly works: number; readonly series: number; readonly editions: number };
   readonly bytes: number;
-}
-
-export interface MaintenanceStats {
-  readonly booksOnDisk: number;
-  readonly filesOnDisk: number;
-  readonly metadataRows: number;
-  readonly confirmed: number;
-  readonly missing: number;
-  readonly missingUnconfirmed: number;
-  readonly reviewQueue: number;
-  readonly hashCacheEntries: number;
-  readonly httpCacheEntries: number;
-  /** ISBNdb records kept for good (never cleared with the lookup cache). */
-  readonly isbndbRecords: number;
-  /** Their cover images downloaded so far, and their size. */
-  readonly isbndbCovers: number;
-  readonly isbndbCoverBytes: number;
-  readonly coverFiles: number;
-  readonly coverBytes: number;
-  readonly orphanCoverFiles: number;
-  readonly databaseBytes: number;
-}
-
-export interface CleanupResult {
-  readonly removedBooks: number;
-  readonly removedCoverFiles: number;
-}
-
-/** Books whose unconfirmed metadata the built-in metadata rules changed. */
-export interface MetadataRulesResult {
-  readonly changed: number;
-}
-
-// ---- Name cleanup (merging spelling variants) ------------------------------------------
-
-export const CLEANUP_FIELDS = ["authors", "tags", "series", "publishers"] as const;
-export type CleanupField = (typeof CLEANUP_FIELDS)[number];
-
-/** How a variant relates to its group's main name, strongest first; `similar` = only through another variant. */
-export type NameMatchKind = "main" | "case" | "punctuation" | "typo" | "initials" | "similar";
-
-export interface NameVariantDto {
-  readonly name: string;
-  /** Books on disk with this spelling. */
-  readonly books: number;
-  readonly match: NameMatchKind;
-  /** Ticked when the list first appears (the main name and safe matches). */
-  readonly preselected: boolean;
-}
-
-export interface NameGroupDto {
-  /** The most used spelling, offered as the name to merge into. */
-  readonly main: string;
-  /** The main name first, then the variants, strongest match first. */
-  readonly variants: readonly NameVariantDto[];
-}
-
-export interface NameGroupsDto {
-  readonly field: CleanupField;
-  readonly groups: readonly NameGroupDto[];
-  /** Names without variants (authors only, so a lone badly written name can be renamed). */
-  readonly singles: readonly FacetDto[];
-}
-
-export interface NameMergeRequest {
-  readonly field: CleanupField;
-  readonly from: readonly string[];
-  readonly to: string;
-}
-
-export interface NameMergeResult {
-  /** Books whose metadata changed. */
-  readonly books: number;
-  readonly renamed: readonly RenameResult[];
-  readonly errors: readonly string[];
-}
-
-/** A book listed by name, linking to its page. */
-export interface BookRefDto {
-  readonly id: number;
-  readonly title: string;
-  readonly authors: readonly string[];
-}
-
-/** A book whose title and authors look swapped (title reads as a person's name, authors as a title). */
-export interface SwapSuspectDto {
-  readonly id: number;
-  readonly title: string;
-  readonly authors: readonly string[];
-  /** Its files on disk, relative to the library. */
-  readonly files: readonly string[];
-  /** The suggested fix. */
-  readonly proposed: { readonly title: string; readonly authors: readonly string[] };
-  /** `filename`: its file's name, read again, gives the swapped fields; `swap`: the two fields exchanged. */
-  readonly basis: "filename" | "swap";
-}
-
-export interface TitleAuthorFix {
-  readonly id: number;
-  readonly title: string;
-  readonly authors: readonly string[];
-}
-
-export interface TitleAuthorFixRequest {
-  readonly items: readonly TitleAuthorFix[];
-}
-
-/** Where author names are looked up: Wikidata first, Open Library as the fallback. */
-export type AuthorSource = "wikidata" | "openlibrary";
-
-/** An author record found by name, to merge spellings into its name. */
-export interface AuthorMatchDto {
-  readonly source: AuthorSource;
-  /** Wikidata item ("Q36322") or Open Library author key ("OL21594A"). */
-  readonly key: string;
-  readonly name: string;
-  /** "1775–1817", or null when unknown. */
-  readonly years: string | null;
-  /** Wikidata's short description ("English novelist"). */
-  readonly description: string | null;
-  /** Open Library only. */
-  readonly topWork: string | null;
-  readonly workCount: number | null;
-  readonly alternateNames: readonly string[];
-  /** Library authority records for this person (Library of Congress, GND, VIAF…), Wikidata only. */
-  readonly authorities: readonly { readonly name: string; readonly url: string }[];
-  readonly url: string;
-}
-
-export interface AuthorSearchDto {
-  /** The source the matches come from. */
-  readonly source: AuthorSource;
-  readonly matches: readonly AuthorMatchDto[];
-  /** Why Open Library was used instead of Wikidata, if it was a fallback. */
-  readonly note: string | null;
-}
-
-/** A remembered variant: new imports and lookups get `canonical` instead. */
-export interface AliasDto {
-  readonly field: CleanupField;
-  readonly variant: string;
-  readonly canonical: string;
 }

@@ -1,7 +1,7 @@
 import type { ExternalTools } from "../config.ts";
 import type { RawMetadata } from "../metadata/types.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
-import { cover, isImageName, mimeFromName, naturalSort } from "./images.ts";
+import { cover, isImageName, naturalSort } from "./images.ts";
 import { run, runText } from "./subprocess.ts";
 import { htmlToText, normalizeDate, splitList } from "./text.ts";
 import { arr, attr, decodeXml, parseXml, textOf } from "./xml.ts";
@@ -35,7 +35,7 @@ export async function extractComic(archive: ComicArchive): Promise<RawMetadata> 
       ? {
           loadCover: async () => {
             const data = await archive.read(coverName);
-            return data ? cover(data, mimeFromName(coverName)) : null;
+            return data ? cover(data) : null;
           },
         }
       : {}),

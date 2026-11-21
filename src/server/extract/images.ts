@@ -6,16 +6,8 @@ export function isImageName(name: string): boolean {
   return IMAGE_EXT.test(name) && !name.split("/").some((seg) => seg.startsWith(".") || seg === "__MACOSX");
 }
 
-export function mimeFromName(name: string): string {
-  const ext = name.toLowerCase().split(".").pop() ?? "";
-  return (
-    { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", avif: "image/avif", bmp: "image/bmp", tif: "image/tiff", tiff: "image/tiff", jxl: "image/jxl" }[ext] ??
-    "application/octet-stream"
-  );
-}
-
-export function cover(data: Uint8Array, mime: string): CoverImage | null {
-  return data.byteLength > 0 ? { data, mime } : null;
+export function cover(data: Uint8Array): CoverImage | null {
+  return data.byteLength > 0 ? { data } : null;
 }
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });

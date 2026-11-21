@@ -36,7 +36,3 @@ export function prune(db: Database, keep: ReadonlySet<string>): number {
   })();
   return stale.length;
 }
-
-export function count(db: Database): number {
-  return (db.query("SELECT count(*) AS n FROM file_hash_cache").get() as { n: number }).n;
-}

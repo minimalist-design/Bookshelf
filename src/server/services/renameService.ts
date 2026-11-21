@@ -45,7 +45,7 @@ function planRename(root: string, book: BookRecord, file: IndexedFile): Rename |
 /**
  * Rename every on-disk file of a book to `{author} - {title} [{id}].{ext}` in its current
  * directory. Must run inside `linker.exclusive`; synchronous so the index and hash cache are
- * updated before the watcher reacts (it then sees nothing new).
+ * updated together with the files (a later scan then sees nothing new).
  */
 export function renameBookFiles(deps: RenameDeps, bookId: number): BulkRenameResult {
   const { db, library } = deps;

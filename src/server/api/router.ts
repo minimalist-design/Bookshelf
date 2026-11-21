@@ -9,8 +9,6 @@ import * as referenceStore from "../reference/store.ts";
 import * as lookups from "../services/lookup/lookup.ts";
 import * as books from "../services/books.ts";
 import * as shelves from "../services/shelves.ts";
-import * as maintenance from "../services/maintenance.ts";
-import * as cleanup from "../services/cleanup.ts";
 
 export function apiRoutes(app: AppContext) {
   return {
@@ -77,20 +75,9 @@ export function apiRoutes(app: AppContext) {
         json(await books.normalizeFilenames(app, [Number(req.params.id)])),
       ),
     },
-    "/api/books/:id/merge": {
-      POST: handle(async (req: Bun.BunRequest<"/api/books/:id/merge">) => {
-        const { intoId } = await readJson<{ intoId: unknown }>(req);
-        return json(await books.merge(app, Number(req.params.id), idList([intoId])[0]!));
-      }),
-    },
-    "/api/books/:id/files/:hash/detach": {
-      POST: handle(async (req: Bun.BunRequest<"/api/books/:id/files/:hash/detach">) =>
-        json(await books.detach(app, Number(req.params.id), req.params.hash)),
-      ),
-    },
     "/api/books/:id/cover": {
       GET: handle((req: Bun.BunRequest<"/api/books/:id/cover">) =>
-        coverResponse(app, Number(req.params.id), new URL(req.url).searchParams.get("size"), req),
+        coverResponse(app, Number(req.params.id), req),
       ),
       PUT: handle(async (req: Bun.BunRequest<"/api/books/:id/cover">) => {
         const data = await req.bytes();
@@ -115,21 +102,6 @@ export function apiRoutes(app: AppContext) {
         return json(queue ? { ...imported, lookupQueued: true } : imported, { status });
       }),
     },
-    "/api/maintenance/stats": { GET: handle(() => json(maintenance.stats(app))) },
-    "/api/maintenance/missing": {
-      GET: handle(async () => json(await maintenance.missing(app))),
-      // Forget (permanently delete) metadata of books without files.
-      POST: handle(async (req) => json(await maintenance.forget(app, idList((await readJson<{ ids: unknown }>(req)).ids)))),
-    },
-    "/api/maintenance/cleanup": { POST: handle(async () => json(await maintenance.cleanup(app))) },
-    "/api/maintenance/rules": { POST: handle(async () => json(await maintenance.applyMetadataRules(app))) },
-    "/api/maintenance/normalize": {
-      POST: handle(async (req) => {
-        const { shelf } = await readJson<{ shelf?: unknown }>(req);
-        if (shelf !== undefined && shelf !== null && typeof shelf !== "string") throw new ValidationError("shelf must be a name, \"\" or null");
-        return json(await maintenance.normalize(app, shelf as string | null | undefined));
-      }),
-    },
     // Reference data: GET lists the imported files; POST imports the request body (raw file, ?name=<file name>).
     "/api/reference": {
       GET: handle(() => json(referenceStore.list(app.config.referenceDir))),
@@ -146,40 +118,6 @@ export function apiRoutes(app: AppContext) {
       DELETE: handle((req: Bun.BunRequest<"/api/reference/:source">) => {
         referenceStore.remove(app.config.referenceDir, req.params.source);
         return json({ removed: req.params.source });
-      }),
-    },
-    "/api/maintenance/http-cache": { DELETE: handle(() => json({ removed: maintenance.clearHttpCache(app) })) },
-    "/api/cleanup/groups": {
-      GET: handle(async (req) => json(await cleanup.groups(app, new URL(req.url).searchParams.get("field")))),
-    },
-    "/api/cleanup/merge": {
-      POST: handle(async (req) => {
-        const body = await readJson<{ field: unknown; from: unknown; to: unknown }>(req);
-        return json(await cleanup.merge(app, body.field, body.from, body.to));
-      }),
-    },
-    "/api/cleanup/author-search": {
-      GET: handle(async (req) => {
-        const params = new URL(req.url).searchParams;
-        return json(await cleanup.searchAuthors(app, params.get("q"), params.get("source")));
-      }),
-    },
-    "/api/cleanup/books": {
-      GET: handle(async (req) => {
-        const params = new URL(req.url).searchParams;
-        return json(await cleanup.booksWithName(app, params.get("field"), params.get("name")));
-      }),
-    },
-    "/api/cleanup/swaps": {
-      GET: handle(async () => json(await cleanup.swapSuspects(app))),
-      POST: handle(async (req) => json(await cleanup.fixTitleAuthor(app, (await readJson<{ items: unknown }>(req)).items))),
-    },
-    "/api/cleanup/aliases": {
-      GET: handle(() => json(cleanup.listAliases(app))),
-      DELETE: handle(async (req) => {
-        const body = await readJson<{ field: unknown; variant: unknown }>(req);
-        cleanup.removeAlias(app, body.field, body.variant);
-        return json(cleanup.listAliases(app));
       }),
     },
     "/api/lookup/status": { GET: handle(() => json(app.lookup.status())) },
@@ -251,7 +189,7 @@ function bookFile(app: AppContext, req: Bun.BunRequest<"/api/books/:id/files/:ha
   const { abs, file } = books.fileOf(app, Number(req.params.id), req.params.hash);
   const download = new URL(req.url).searchParams.has("download");
   return serveFile(req, abs, {
-    contentType: file.filename.toLowerCase().endsWith(".zip") || file.filename.toLowerCase().endsWith(".fbz") ? "application/zip" : CONTENT_TYPES[file.format],
+    contentType: CONTENT_TYPES[file.format],
     etag: file.hash,
     disposition: contentDisposition(download ? "attachment" : "inline", file.filename),
   });

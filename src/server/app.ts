@@ -1,9 +1,7 @@
 import type { Database } from "bun:sqlite";
-import { join } from "node:path";
 import { detectExternalTools, ensureDataDirs, loadConfig, type AppConfig, type ExternalTools } from "./config.ts";
 import { readConfigFile } from "./configFile.ts";
 import { openDatabase } from "./db/index.ts";
-import { createAliases, type Aliases } from "./db/repo/aliases.ts";
 import * as bookRepo from "./db/repo/books.ts";
 import * as isbndbRecords from "./db/repo/isbndbRecords.ts";
 import * as settingsRepo from "./db/repo/settings.ts";
@@ -21,13 +19,12 @@ import { cleanIncoming } from "./reference/store.ts";
 
 /**
  * Everything the server shares: configuration, the database, and the parts that hold state
- * (library index and watcher, HTTP pacing, background workers). Service modules are plain
+ * (library index, HTTP pacing, background workers). Service modules are plain
  * functions that take the parts they need from it.
  */
 export interface AppContext {
   config: AppConfig;
   db: Database;
-  aliases: Aliases;
   tools: ExternalTools;
   events: EventBus;
   /** Answers `/api/health`. */
@@ -54,8 +51,9 @@ export interface CreateAppOptions {
 export function createApp(config: AppConfig = loadConfig(readConfigFile()), options: CreateAppOptions = {}): AppContext {
   ensureDataDirs(config);
   cleanIncoming(config.referenceDir);
+  // Earlier versions kept a resized thumbnail next to each cover; covers are now served as they are.
+  coverStore.removeLegacyThumbnails(config.coversDir);
   const db = openDatabase(config.dbPath);
-  const aliases = createAliases(db);
   const tools = detectExternalTools();
   const events = createEventBus();
   const extract = createExtractor(tools);
@@ -77,7 +75,6 @@ export function createApp(config: AppConfig = loadConfig(readConfigFile()), opti
         }
       },
       onBooksDeleted: (ids) => coverStore.removeMany(config.coversDir, ids),
-      canonicalize: (m) => aliases.apply(m),
     },
     options.library,
   );
@@ -104,7 +101,6 @@ export function createApp(config: AppConfig = loadConfig(readConfigFile()), opti
   return {
     config,
     db,
-    aliases,
     tools,
     events,
     health: createHealth(db),

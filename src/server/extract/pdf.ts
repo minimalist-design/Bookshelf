@@ -106,5 +106,5 @@ export async function extractPdf(path: string, pdftoppm: string | null): Promise
 async function renderFirstPage(pdftoppm: string, path: string) {
   // No output root → image on stdout (with -singlefile it would write a file literally named "-.jpg").
   const r = await run([pdftoppm, "-f", "1", "-l", "1", "-jpeg", "-scale-to", "1200", path], 60_000);
-  return r.exitCode === 0 ? cover(r.stdout, "image/jpeg") : null;
+  return r.exitCode === 0 ? cover(r.stdout) : null;
 }

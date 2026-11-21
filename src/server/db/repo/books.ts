@@ -3,7 +3,6 @@ import { chunk } from "../../collections.ts";
 import { toSortName } from "../../naming/authors.ts";
 import type { BookFormat } from "../../naming/formats.ts";
 import type { BookMetadata, MetadataSource } from "../../metadata/types.ts";
-import type { CleanupField } from "../../../shared/types.ts";
 
 export type ConfirmedSource = "isbndb" | "openlibrary" | "doi" | "manual";
 
@@ -103,17 +102,6 @@ export function exists(db: Database, id: number): boolean {
 
 export function allIds(db: Database): number[] {
   return (db.query("SELECT id FROM books").all() as { id: number }[]).map((r) => r.id);
-}
-
-/** Books whose metadata was confirmed (looked up or edited). */
-export function confirmedCount(db: Database): number {
-  return (db.query("SELECT count(*) AS n FROM books WHERE confirmed_source IS NOT NULL").get() as { n: number }).n;
-}
-
-/** The formats each book has had files in, sorted. */
-export function formatsByBook(db: Database): Map<number, BookFormat[]> {
-  const rows = db.query("SELECT DISTINCT book_id, format FROM book_hashes ORDER BY format").all() as { book_id: number; format: BookFormat }[];
-  return new Map([...Map.groupBy(rows, (r) => r.book_id)].map(([id, list]) => [id, list.map((r) => r.format)]));
 }
 
 export function count(db: Database): number {
@@ -262,15 +250,6 @@ export function setOpenLibraryKeys(db: Database, id: number, edition: string | n
   db.query("UPDATE books SET ol_edition_key = ?, ol_work_key = ? WHERE id = ?").run(edition, work, id);
 }
 
-/** Re-assign every known content hash of `fromId` to `toId`. */
-export function moveHashes(db: Database, fromId: number, toId: number): void {
-  db.query("UPDATE book_hashes SET book_id = ? WHERE book_id = ?").run(toId, fromId);
-}
-
-export function deleteHash(db: Database, hash: string): void {
-  db.query("DELETE FROM book_hashes WHERE hash = ?").run(hash);
-}
-
 export function addHash(db: Database, hash: string, bookId: number, format: BookFormat): void {
   db
     .query(
@@ -304,36 +283,6 @@ export function removeMany(db: Database, ids: readonly number[]): void {
     }
     pruneOrphans(db, );
   })();
-}
-
-/** Whether some book (other than `exceptBookId`) has this author (any case). */
-export function hasAuthor(db: Database, name: string, exceptBookId: number | null = null): boolean {
-  return (
-    db
-      .query(
-        `SELECT 1 FROM authors a JOIN book_authors ba ON ba.author_id = a.id
-         WHERE a.name = ?1 COLLATE NOCASE AND (?2 IS NULL OR ba.book_id <> ?2) LIMIT 1`,
-      )
-      .get(name, exceptBookId) !== null
-  );
-}
-
-/** Every book row (on disk or not) with one of these authors, tags (any case), series or publishers. */
-export function idsWithName(db: Database, field: CleanupField, names: readonly string[]): number[] {
-  if (!names.length) return [];
-  const marks = names.map(() => "?").join(", ");
-  const sql = {
-    authors: `SELECT DISTINCT ba.book_id AS id FROM book_authors ba JOIN authors a ON a.id = ba.author_id WHERE a.name IN (${marks})`,
-    tags: `SELECT DISTINCT bt.book_id AS id FROM book_tags bt JOIN tags t ON t.id = bt.tag_id WHERE t.name IN (${marks})`,
-    series: `SELECT id FROM books WHERE series IN (${marks})`,
-    publishers: `SELECT id FROM books WHERE publisher IN (${marks})`,
-  }[field];
-  return (db.query(sql).all(...names) as { id: number }[]).map((r) => r.id);
-}
-
-/** Tags are unique regardless of case and keep their first spelling; this sets the spelling. */
-export function setTagSpelling(db: Database, name: string): void {
-  db.query("UPDATE tags SET name = ?1 WHERE name = ?1").run(name);
 }
 
 function setAuthors(db: Database, bookId: number, names: readonly string[]): void {

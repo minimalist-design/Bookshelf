@@ -111,7 +111,7 @@ export function createImporter(deps: ImportDeps): Importer {
     return { status: placedStatus(decision.outcome, index.hasBook(decision.bookId)), bookId: decision.bookId, preferred: decision.preferred };
   };
 
-  /** Move the staged file into place and index it (no awaits: it must be indexed before the watcher looks at it). */
+  /** Move the staged file into place and index it (no awaits: the file and the index change together). */
   const place = (root: string, tmp: string, hash: string, ext: string, shelf: string | null, decided: Omit<Placed, "file">): Placed => {
     const dirRel = targetDir(decided.status, library.index.filesOfBook(decided.bookId), shelf);
     const dirAbs = dirRel === "" ? root : join(root, dirRel);

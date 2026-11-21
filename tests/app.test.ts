@@ -32,9 +32,10 @@ describe("database", () => {
     const app = makeApp();
     const tables = app.db.query("SELECT name FROM sqlite_master WHERE type IN ('table')").all() as { name: string }[];
     const names = tables.map((t) => t.name);
-    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "http_cache", "review_queue", "lookup_jobs", "http_calls", "aliases", "isbndb_records"]) {
+    for (const t of ["settings", "books", "book_hashes", "authors", "tags", "books_fts", "file_hash_cache", "review_queue", "lookup_jobs", "http_calls", "isbndb_records"]) {
       expect(names).toContain(t);
     }
+    for (const gone of ["http_cache", "aliases"]) expect(names).not.toContain(gone);
     expect((app.db.query("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     expect(migrate(app.db)).toBe(0);
   });
@@ -53,7 +54,7 @@ describe("database", () => {
     );
     // Add a line for each new migration; never change one.
     expect(sums).toEqual({
-      "001_init.sql": "0434772728296ab2",
+      "001_init.sql": "27b798c739762bd8",
     });
   });
 
@@ -144,7 +145,7 @@ describe("settings", () => {
     expect(updateSettings(app, { libraryRoot: null }).libraryRoot).toBeNull();
     expect(settingsRepo.get(app.db, "libraryRoot")).toBeNull();
     await app.library.whenReady();
-    expect(app.library.status()).toMatchObject({ state: "no-root", root: null, fileCount: 0, watching: false });
+    expect(app.library.status()).toMatchObject({ state: "no-root", root: null, fileCount: 0 });
     expect(existsSync(join(lib, "Shelf", "book.epub"))).toBe(true);
   });
 

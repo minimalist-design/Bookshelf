@@ -1,4 +1,4 @@
-/** Book-level operations: edit, normalize filenames, merge, detach, move, delete, cover, file access. */
+/** Book-level operations: edit, normalize filenames, move, delete, cover, file access. */
 import { rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AppContext } from "../app.ts";
@@ -15,7 +15,6 @@ import { toDetail } from "../library/queries.ts";
 import type { BookMetadata } from "../metadata/types.ts";
 import { toDisplayName } from "../naming/authors.ts";
 import { normalizeDoi } from "../naming/doi.ts";
-import { detectFormat } from "../naming/formats.ts";
 import { normalizeIsbn } from "../naming/isbn.ts";
 import type { BookActionResult, BookDetailDto, BookUpdate, BulkRenameResult, DeleteResult, MoveResult } from "../../shared/types.ts";
 import { ConflictError, NotFoundError } from "../api/http.ts";
@@ -63,12 +62,12 @@ export function namesChange(current: BookMetadata, next: BookMetadata): boolean 
   );
 }
 
-/** Two rows sharing an ISBN/DOI would make file linking ambiguous: suggest merging instead. */
+/** Two rows sharing an ISBN/DOI would make file linking ambiguous: refused. */
 function assertIdentifiersFree(db: AppContext["db"], id: number, isbn13: string | null, doi: string | null): void {
   const other = bookRepo.bookIdsByIdentifiers(db, isbn13, doi).find((o) => o !== id);
   if (other === undefined) return;
   const book = bookRepo.get(db, other)!;
-  throw new ConflictError(`"${book.title}" already has this ${isbn13 && book.isbn13 === isbn13 ? "ISBN" : "DOI"}; merge the books instead`, {
+  throw new ConflictError(`"${book.title}" already has this ${isbn13 && book.isbn13 === isbn13 ? "ISBN" : "DOI"}`, {
     bookId: book.id,
   });
 }
@@ -107,73 +106,6 @@ export async function normalizeFilenames(deps: Deps, ids: readonly number[]): Pr
     events.libraryChanged(ids);
     return { renamed: results.flatMap((r) => r.renamed), errors: results.flatMap((r) => r.errors) };
   });
-}
-
-/**
- * Merge `sourceId` into `targetId` (e.g. two formats of a book without identifiers).
- * The target keeps its metadata, filling empty fields from the source; the source row is
- * removed; its files take the target's names. Refused when both have the same format.
- */
-export async function merge(deps: Deps, sourceId: number, targetId: number): Promise<BookActionResult> {
-  if (sourceId === targetId) throw new ValidationError("Cannot merge a book into itself");
-  const { db, library, events } = deps;
-  const coversDir = deps.config.coversDir;
-  return library.linker.exclusive(() => {
-    const source = requireVisible(deps, sourceId);
-    const target = requireVisible(deps, targetId);
-    const targetFormats = new Set(library.index.filesOfBook(targetId).map((f) => f.format));
-    const clash = library.index.filesOfBook(sourceId).find((f) => targetFormats.has(f.format));
-    if (clash) throw new ConflictError(`Both books have a ${clash.format.toUpperCase()} file; a book can hold one file per format`);
-
-    bookRepo.updateMetadata(db, targetId, fillEmpty(target, source), null);
-    bookRepo.updateExtras(db, targetId, {
-      rating: target.rating ?? source.rating,
-      notes: [target.notes, source.notes].filter(Boolean).join("\n\n") || null,
-    });
-    bookRepo.moveHashes(db, sourceId, targetId);
-    for (const f of library.index.filesOfBook(sourceId)) library.index.set({ ...f, bookId: targetId });
-    if (!target.hasCover && source.hasCover) {
-      // Adopt the source's cover by re-saving its files under the target id.
-      coverStore.adopt(coversDir, sourceId, targetId);
-      bookRepo.setHasCover(db, targetId, true, source.coverSource);
-    }
-    bookRepo.remove(db, sourceId);
-    coverStore.remove(coversDir, sourceId);
-    bookRepo.confirm(db, targetId, "manual");
-    const renamed = renameBookFiles(deps, targetId);
-    events.libraryChanged([sourceId, targetId]);
-    return { book: detail(deps, targetId), ...renamed };
-  });
-}
-
-/**
- * Split one file off into its own (unconfirmed) book with metadata freshly read from it.
- * The new row is created directly: it must not re-attach by identifier.
- */
-export async function detach(deps: Deps & Pick<AppContext, "extract">, bookId: number, hash: string): Promise<BookActionResult> {
-  const { db, library, events, extract } = deps;
-  requireVisible(deps, bookId);
-  const files = library.index.filesOfBook(bookId);
-  const file = files.find((f) => f.hash === hash);
-  if (!file) throw new NotFoundError("File not found in this book");
-  if (files.length < 2) throw new ValidationError("The book has only this file");
-
-  const detected = detectFormat(file.filename)!;
-  const embedded = await extract(join(library.rootPath!, file.relPath), detected.format);
-  const merged = library.linker.merge(embedded, library.linker.parse(file.filename), detected.stem);
-
-  const newId = await library.linker.exclusive(() => {
-    const current = library.index.get(file.relPath);
-    if (!current || current.bookId !== bookId) throw new ConflictError("The file changed meanwhile; try again");
-    const id = bookRepo.create(db, merged.metadata, merged.source);
-    bookRepo.addHash(db, hash, id, detected.format);
-    library.index.set({ ...current, bookId: id });
-    return id;
-  });
-  const image = embedded.loadCover ? await embedded.loadCover().catch(() => null) : null;
-  if (image && (await coverStore.save(deps.config.coversDir, newId, image))) bookRepo.setHasCover(db, newId, true, "embedded");
-  events.libraryChanged([bookId, newId]);
-  return { book: detail(deps, newId), renamed: [], errors: [] };
 }
 
 /**
@@ -251,7 +183,7 @@ async function deleteFiles(deps: Deps, relPaths: readonly string[]): Promise<Del
 /** Replace the cover with an uploaded image (a manual edit: confirms the metadata). */
 export async function setCover(deps: Deps, id: number, data: Uint8Array): Promise<void> {
   requireVisible(deps, id);
-  if (!(await coverStore.save(deps.config.coversDir, id, { data, mime: "application/octet-stream" }))) {
+  if (!(await coverStore.save(deps.config.coversDir, id, { data }))) {
     throw new ValidationError("The image could not be read");
   }
   bookRepo.setHasCover(deps.db, id, true, "upload");
@@ -354,27 +286,5 @@ export function applyPatch(current: BookRecord, p: BookUpdate): BookMetadata {
     series,
     seriesIndex: series ? seriesIndex : null,
     tags,
-  };
-}
-
-/** Target wins; empty target fields are filled from the source. */
-function fillEmpty(target: BookRecord, source: BookRecord): BookMetadata {
-  const pick = <T>(a: T, b: T): T => (a === null || a === undefined || a === "" || (Array.isArray(a) && a.length === 0) ? b : a);
-  return {
-    title: target.title,
-    subtitle: pick(target.subtitle, source.subtitle),
-    authors: pick(target.authors, source.authors),
-    isbn13: pick(target.isbn13, source.isbn13),
-    doi: pick(target.doi, source.doi),
-    publisher: pick(target.publisher, source.publisher),
-    edition: pick(target.edition, source.edition),
-    publishedDate: pick(target.publishedDate, source.publishedDate),
-    year: pick(target.year, source.year),
-    language: pick(target.language, source.language),
-    pages: pick(target.pages, source.pages),
-    description: pick(target.description, source.description),
-    series: pick(target.series, source.series),
-    seriesIndex: target.series ? target.seriesIndex : source.seriesIndex,
-    tags: [...new Set([...target.tags, ...source.tags])],
   };
 }

@@ -6,7 +6,7 @@ import * as coverStore from "../covers/store.ts";
 import * as bookRepo from "../db/repo/books.ts";
 
 const SORTS: readonly LibrarySort[] = ["title", "author", "added", "year", "series", "rating"];
-const FORMATS: readonly BookFormat[] = ["epub", "pdf", "cbz", "cbr", "djvu", "fb2"];
+const FORMATS: readonly BookFormat[] = ["epub", "pdf", "cbz", "cbr", "djvu"];
 const MISSING: readonly MissingFilter[] = ["id", "author", "cover", "description"];
 
 export function parseLibraryQuery(url: URL): LibraryQuery {
@@ -50,16 +50,14 @@ export function bookDetail(app: AppContext, id: number) {
   return toDetail(book, files);
 }
 
-/** Serve a stored cover (thumb or full) with ETag revalidation. */
-export function coverResponse(app: AppContext, id: number, sizeParam: string | null, req: Request): Response {
-  const size = sizeParam === "full" ? "full" : "thumb";
-  const etag = coverStore.etag(app.config.coversDir, id, size);
-  if (!etag || !bookRepo.get(app.db, id)?.hasCover) throw new NotFoundError("No cover");
+/** Serve a book's cover file as it was stored, with ETag revalidation. */
+export function coverResponse(app: AppContext, id: number, req: Request): Response {
+  const cover = bookRepo.get(app.db, id)?.hasCover ? coverStore.find(app.config.coversDir, id) : null;
+  const etag = cover && coverStore.etag(cover.path);
+  if (!cover || !etag) throw new NotFoundError("No cover");
   const headers = { ETag: etag, "Cache-Control": "no-cache" };
   if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers });
-  return new Response(Bun.file(coverStore.path(app.config.coversDir, id, size)), {
-    headers: { ...headers, "Content-Type": size === "full" ? "image/jpeg" : "image/webp" },
-  });
+  return new Response(Bun.file(cover.path), { headers: { ...headers, "Content-Type": cover.contentType } });
 }
 
 export function facets(app: AppContext) {

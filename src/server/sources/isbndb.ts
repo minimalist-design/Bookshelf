@@ -65,10 +65,9 @@ export interface IsbndbKeyInfo {
 
 const auth = (apiKey: string) => ({ headers: { Authorization: apiKey } });
 
-/** GET of JSON: from the HTTP cache when allowed, else always asked (`fresh`); null for 404. */
-async function getJson<T>(http: HttpClient, url: string, apiKey: string, fresh: boolean): Promise<T | null> {
-  if (!fresh) return http.getJson<T>(url, "application/json", auth(apiKey));
-  const res = await http.getFresh(url, auth(apiKey));
+/** GET of JSON; null for 404. */
+async function getJson<T>(http: HttpClient, url: string, apiKey: string): Promise<T | null> {
+  const res = await http.get(url, "application/json", auth(apiKey));
   if (res.status === 404) return null;
   if (res.status !== 200) throw new HttpError(`ISBNdb answered ${res.status}${errorText(res.body)}`, res.status);
   try {
@@ -78,7 +77,7 @@ async function getJson<T>(http: HttpClient, url: string, apiKey: string, fresh: 
   }
 }
 
-/** The URL of one book, also its cache key. */
+/** The URL of one book. */
 export const isbndbBookUrl = (isbn13: string) => `${API}/book/${isbn13}`;
 
 const label = (parts: readonly (string | number | null | undefined)[]) =>
@@ -134,14 +133,13 @@ export function keptByIsbn(store: IsbndbStore, isbn13: string): MetadataCandidat
 }
 
 /**
- * One book by ISBN: from the local copy when ISBNdb sent it before (by any call), else asked (a
- * recent "not found" is answered from the HTTP cache: ISBNdb may add the book within a day).
+ * One book by ISBN: from the local copy when ISBNdb sent it before (by any call), else asked.
  * `fresh` asks ISBNdb even for a kept record, and keeps its newer answer.
  */
 export async function isbndbByIsbn(http: HttpClient, apiKey: string, store: IsbndbStore, isbn13: string, fresh = false): Promise<MetadataCandidate | null> {
   const kept = fresh ? null : keptByIsbn(store, isbn13);
   if (kept) return kept;
-  const data = await getJson<{ book?: IsbndbRecord }>(http, isbndbBookUrl(isbn13), apiKey, fresh);
+  const data = await getJson<{ book?: IsbndbRecord }>(http, isbndbBookUrl(isbn13), apiKey);
   if (!data?.book) return null;
   store.putMany([data.book], "book", isbnOfRecord);
   return isbndbCandidate(data.book as IsbndbBook, "isbn");
@@ -150,8 +148,7 @@ export async function isbndbByIsbn(http: HttpClient, apiKey: string, store: Isbn
 /**
  * Title/author search (one daily call, whatever the page size). Typed text searches every column;
  * a book's own data searches by title. Every result is kept in the local copy (also the ones
- * beyond `limit`, and the wrong books), and the best `limit` become candidates. `fresh` asks
- * ISBNdb even when the same search was made recently.
+ * beyond `limit`, and the wrong books), and the best `limit` become candidates.
  */
 export async function isbndbSearch(
   http: HttpClient,
@@ -159,7 +156,6 @@ export async function isbndbSearch(
   store: IsbndbStore,
   query: { title?: string | null; author?: string | null; q?: string | null },
   limit = 8,
-  fresh = false,
 ): Promise<MetadataCandidate[]> {
   const text = (query.q ?? [query.title, query.author].filter(Boolean).join(" ")).replace(/\s+/g, " ").trim().slice(0, 150);
   if (!text) return [];
@@ -170,7 +166,7 @@ export async function isbndbSearch(
   });
   // With a title-only column the author would never match: search the title, keep the author for ranking.
   const path = !query.q && query.title ? query.title.trim().slice(0, 150) : text;
-  const data = await getJson<{ books?: IsbndbRecord[] }>(http, `${API}/books/${encodeURIComponent(path)}?${params}`, apiKey, fresh);
+  const data = await getJson<{ books?: IsbndbRecord[] }>(http, `${API}/books/${encodeURIComponent(path)}?${params}`, apiKey);
   const records = data?.books ?? [];
   store.putMany(records, "search", isbnOfRecord);
   const author = query.author?.toLowerCase().split(/\s+/).at(-1) ?? null;
@@ -229,9 +225,9 @@ export function isbndbKeptSearch(
   return { candidates, sure: matches.some(isIt) };
 }
 
-/** The plan behind the key and today's quota; free (not charged against the daily limit), never cached. */
+/** The plan behind the key and today's quota; free (not charged against the daily limit). */
 export async function isbndbKeyInfo(http: HttpClient, apiKey: string): Promise<IsbndbKeyInfo> {
-  const res = await http.getFresh(`${API}/key`, { ...auth(apiKey), cost: 0 });
+  const res = await http.get(`${API}/key`, "application/json", { ...auth(apiKey), cost: 0 });
   if (res.status !== 200) throw new HttpError(`ISBNdb answered ${res.status}${errorText(res.body)}`, res.status);
   const k = JSON.parse(res.body) as { plan_name?: string; bulk_limit?: number; plan_limit?: { total?: number; spent?: number; left?: number } };
   return {

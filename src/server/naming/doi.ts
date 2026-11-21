@@ -26,14 +26,3 @@ export function doiFromFilename(token: string): string | null {
   const m = /^(10\.\d{4,9})_(.+)$/.exec(t);
   return m ? normalizeDoi(`${m[1]}/${m[2]}`) : null;
 }
-
-/**
- * Plausible original DOIs for a filename token, most likely first. Used by
- * lookups to retry when the first guess is not found (suffixes may contain `/`).
- */
-export function doiCandidatesFromFilename(token: string): string[] {
-  const m = /^(10\.\d{4,9})_(.+)$/.exec(token.trim());
-  if (!m) return [];
-  const [, prefix, suffix] = m as unknown as [string, string, string];
-  return [`${prefix}/${suffix}`, ...(suffix.includes("_") ? [`${prefix}/${suffix.replace(/_/g, "/")}`] : [])];
-}
